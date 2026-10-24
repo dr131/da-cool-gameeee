@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#1a1a2e">
 <link rel="manifest" href="manifest.json">
 <title>Tactics</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.4.2/pixi.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.4.2/pixi.min.js" crossorigin="anonymous"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
@@ -28,6 +28,8 @@
 <script>
 // Глобальный обработчик ошибок — показывает красную плашку на iOS
 window.onerror = function(msg, src, line, col, err) {
+  // "Script error" without details = cross-origin script, ignore
+  if (!msg || msg === 'Script error.' || msg === 'Script error') return true;
   var d = document.getElementById('dbg');
   if (d) { d.style.display = 'block'; d.textContent = 'ERR line ' + line + ': ' + msg; }
   return true;
