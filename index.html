@@ -1172,11 +1172,14 @@ function updateCamera(dt) {
 
 // ── AI (красные) ───────────────────────────────────────────
 var aiTimer = 0;
-var AI_INTERVAL = 2.0; // решение каждые 2 секунды
+var AI_INTERVAL = 2.5;
+var aiMode = 'camp'; // 'camp' | 'raid' | 'flank' | 'retreat'
+var aiModeTimer = 0; // блокировка смены режима
 
 var aiLog = '';
 function updateAI(dt) {
   aiTimer -= dt;
+  aiModeTimer = Math.max(0, aiModeTimer - dt);
   if (aiTimer > 0) return;
   aiTimer = AI_INTERVAL;
 
@@ -1194,58 +1197,98 @@ function updateAI(dt) {
   for (var _r = 0; _r < reds.length; _r++) { rx += reds[_r].x; ry += reds[_r].y; }
   rx /= reds.length; ry /= reds.length;
 
+  // Центр масс синих
+  var bx = 0, by = 0;
+  for (var _bb = 0; _bb < blues.length; _bb++) { bx += blues[_bb].x; by += blues[_bb].y; }
+  if (blues.length > 0) { bx /= blues.length; by /= blues.length; }
+
   var ratio = reds.length / Math.max(1, blues.length);
 
-  // Ближайший синий
+  // Ближайший синий к центру красных
   var nearestBlue = null, nearestBlueDist = Infinity;
   for (var _b = 0; _b < blues.length; _b++) {
     var _d = Math.hypot(blues[_b].x - rx, blues[_b].y - ry);
     if (_d < nearestBlueDist) { nearestBlueDist = _d; nearestBlue = blues[_b]; }
   }
 
-  // Незащищённые лагеря не нашей команды
-  var targetCamp = null, targetCampDist = Infinity;
+  // Анализ лагерей: незащищённые синие, нейтральные, наши
+  var raidTarget = null, raidScore = -Infinity; // незащищённая база синих
+  var campTarget = null, campDist = Infinity;   // нейтральный лагерь
   for (var _c = 0; _c < camps.length; _c++) {
     var camp = camps[_c];
-    if (camp.team === 1) continue;
-    var hasGuard = false;
-    for (var _g = 0; _g < units.length; _g++) {
-      var _ug = units[_g];
-      if (_ug.alive && _ug.campGuard === camp && _ug.isNeutral) { hasGuard = true; break; }
-    }
-    if (!hasGuard) {
+    // Считаем защитников (синих поблизости)
+    var guardCount = 0;
+    forNearby(camp.x, camp.y, 120, function(_gu) {
+      if (_gu.alive && _gu.team === 0) guardCount++;
+    });
+    if (camp.team === 0) {
+      // База синих — оцениваем привлекательность: близко + мало защитников = высокий скор
+      var _dist = Math.hypot(camp.x - rx, camp.y - ry);
+      var score = -guardCount * 40 - _dist * 0.3;
+      if (score > raidScore) { raidScore = score; raidTarget = camp; }
+    } else if (camp.team !== 1) {
+      // Нейтральный
       var _cd = Math.hypot(camp.x - rx, camp.y - ry);
-      if (_cd < targetCampDist) { targetCampDist = _cd; targetCamp = camp; }
+      if (_cd < campDist) { campDist = _cd; campTarget = camp; }
     }
   }
 
-  var tx, ty;
-  if (ratio < 0.6) {
-    // Сильно уступаем — отходим на базу
+  // Фланговая точка: перпендикуляр к центру синих, на 150px в сторону
+  var dx = bx - rx, dy = by - ry;
+  var dlen = Math.hypot(dx, dy) || 1;
+  var perpX = -dy / dlen, perpY = dx / dlen; // перпендикуляр
+  var flankDist = 200;
+  var flankX = bx + perpX * flankDist;
+  var flankY = by + perpY * flankDist;
+  // Ограничим внутрь карты
+  flankX = Math.max(50, Math.min(MAP_W - 50, flankX));
+  flankY = Math.max(50, Math.min(MAP_H - 50, flankY));
+
+  var tx, ty, chosenMode;
+
+  if (ratio < 0.55) {
+    // Сильно уступаем — отступаем на базу
     tx = MAP_W - 80; ty = MAP_H / 2;
-    aiTimer = 1.0;
-  } else if (targetCamp) {
-    // Приоритет: захват лагерей
-    // Исключение: враг вплотную И мы сильно выигрываем — сначала добить
-    if (nearestBlue && nearestBlueDist < 180 && ratio >= 1.5) {
+    chosenMode = 'retreat';
+    aiTimer = 1.5;
+  } else if (raidTarget && guardCount <= 1 && ratio >= 0.9 && aiModeTimer <= 0) {
+    // Рейд: незащищённая или слабо защищённая база синих
+    tx = raidTarget.x; ty = raidTarget.y;
+    chosenMode = 'raid';
+    aiModeTimer = 6; // держим режим 6 секунд
+  } else if (campTarget && aiModeTimer <= 0) {
+    // Захват нейтрального лагеря — приоритет роста
+    if (nearestBlue && nearestBlueDist < 140 && ratio >= 1.4) {
+      // Враг слишком близко и мы сильны — сначала атака
       tx = nearestBlue.x; ty = nearestBlue.y;
+      chosenMode = 'attack';
     } else {
-      tx = targetCamp.x; ty = targetCamp.y;
+      tx = campTarget.x; ty = campTarget.y;
+      chosenMode = 'camp';
     }
+  } else if (nearestBlue && ratio >= 1.3 && aiModeTimer <= 0) {
+    // Превосходство — фланговый манёвр
+    chosenMode = 'flank';
+    tx = flankX; ty = flankY;
+    aiModeTimer = 5;
   } else if (nearestBlue) {
-    // Все лагеря захвачены — атакуем врага
+    // Прямая атака
     tx = nearestBlue.x; ty = nearestBlue.y;
+    chosenMode = 'attack';
   } else {
     tx = MAP_W - 150; ty = MAP_H / 2;
+    chosenMode = 'idle';
   }
 
-  aiLog = 'AI: r=' + reds.length + ' b=' + blues.length + ' tx=' + Math.round(tx);
+  aiMode = chosenMode;
+  aiLog = 'AI[' + chosenMode + ']: r=' + reds.length + ' b=' + blues.length + ' ratio=' + ratio.toFixed(1);
   targets[1][0] = { x: tx, y: ty };
   targets[1][1] = { x: tx, y: ty };
-  // Сбрасываем флаг отступления у красных
+
+  // Сбрасываем отступление у красных если не отходим
   for (var _rr = 0; _rr < units.length; _rr++) {
     if (units[_rr].alive && units[_rr].team === 1 && !units[_rr].campGuard) {
-      if (ratio >= 0.6) units[_rr].retreating = false;
+      if (ratio >= 0.55) units[_rr].retreating = false;
     }
   }
 }
