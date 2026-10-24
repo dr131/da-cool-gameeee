@@ -1134,6 +1134,68 @@ function updateCamera(dt) {
   camY += (camTargetY - camY) * Math.min(1, dt * 7);
 }
 
+// ── AI (красные) ───────────────────────────────────────────
+var aiTimer = 0;
+var AI_INTERVAL = 2.0; // решение каждые 2 секунды
+
+function updateAI(dt) {
+  aiTimer -= dt;
+  if (aiTimer > 0) return;
+  aiTimer = AI_INTERVAL;
+
+  var reds = units.filter(function(u) { return u.alive && u.team === 1 && !u.retreating; });
+  var blues = units.filter(function(u) { return u.alive && u.team === 0; });
+  if (reds.length === 0) return;
+
+  // Центр масс красных
+  var rx = reds.reduce(function(s,u){return s+u.x;},0)/reds.length;
+  var ry = reds.reduce(function(s,u){return s+u.y;},0)/reds.length;
+
+  // Соотношение сил
+  var ratio = reds.length / Math.max(1, blues.length);
+
+  // Ближайший синий
+  var nearestBlue = null, nearestBlueDist = Infinity;
+  blues.forEach(function(b) {
+    var d = Math.hypot(b.x - rx, b.y - ry);
+    if (d < nearestBlueDist) { nearestBlueDist = d; nearestBlue = b; }
+  });
+
+  // Незащищённые нейтральные лагеря (нет охранников)
+  var openCamps = camps.filter(function(c) {
+    if (c.team === 1) return false; // уже наш
+    var guards = units.filter(function(u) { return u.alive && u.campGuard === c && u.isNeutral; });
+    return guards.length === 0;
+  });
+
+  // Ближайший открытый не-наш лагерь
+  var targetCamp = null, targetCampDist = Infinity;
+  openCamps.forEach(function(c) {
+    var d = Math.hypot(c.x - rx, c.y - ry);
+    if (d < targetCampDist) { targetCampDist = d; targetCamp = c; }
+  });
+
+  var tx, ty;
+
+  if (ratio < 0.6 && nearestBlue) {
+    // Сильно уступаем — отступаем к своей базе
+    tx = MAP_W - 80; ty = MAP_H / 2;
+    aiTimer = 1.0; // чаще переоцениваем когда опасно
+  } else if (targetCamp && (ratio > 1.3 || targetCampDist < 300)) {
+    // Перевес или лагерь близко — захватываем лагерь
+    tx = targetCamp.x; ty = targetCamp.y;
+  } else if (nearestBlue && ratio >= 0.6) {
+    // Атакуем ближайшего синего
+    tx = nearestBlue.x; ty = nearestBlue.y;
+  } else {
+    // Держимся у своей базы
+    tx = MAP_W - 150; ty = MAP_H / 2;
+  }
+
+  targets[1][0] = { x: tx, y: ty };
+  targets[1][1] = { x: tx, y: ty };
+}
+
 var last = 0, gameTime = 0;
 function loop(ts) {
   var dt = Math.min((ts - last) / 1000, 0.05);
@@ -1145,6 +1207,7 @@ function loop(ts) {
     buildGrid();
     updateCombat(dt);
     updateCamps(dt);
+    updateAI(dt);
     checkVictory();
     updateCamera(dt);
   }
