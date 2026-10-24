@@ -913,8 +913,6 @@ function checkVictory() {
       // Двигаем камеру к лагерю
       camTargetX = Math.max(0, Math.min(MAP_W - W / ZOOM, newCamp.x - W / ZOOM / 2));
       camTargetY = Math.max(0, Math.min(MAP_H - H / ZOOM, newCamp.y - H / ZOOM / 2));
-      playerRespawnMsg = 'РЕЗЕРВ ПРИНЯЛ КОМАНДОВАНИЕ';
-      playerRespawnMsgTimer = 4.0;
       return; // не конец игры — продолжаем
     }
     // Нет резерва — конец
@@ -1185,21 +1183,6 @@ function draw() {
     ctx.fillText(hint, W/2, H - 14);
   }
 
-  // Сообщение о смене командования
-  if (playerRespawnMsgTimer > 0) {
-    var msgAlpha = Math.min(1, playerRespawnMsgTimer);
-    ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,' + (msgAlpha * 0.7).toFixed(2) + ')';
-    ctx.fillRect(0, H/2 - 40, W, 80);
-    ctx.font = 'bold 18px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(80,180,255,' + msgAlpha.toFixed(2) + ')';
-    ctx.fillText(playerRespawnMsg, W/2, H/2 - 8);
-    ctx.font = '13px monospace';
-    ctx.fillStyle = 'rgba(180,220,255,' + msgAlpha.toFixed(2) + ')';
-    ctx.fillText('Командуй резервом у лагеря', W/2, H/2 + 16);
-    ctx.restore();
-  }
 
   // Конец игры
   if (gameOver) {
@@ -1392,7 +1375,6 @@ function loop(ts) {
     updateAI(dt);
     checkVictory();
     updateCamera(dt);
-    if (playerRespawnMsgTimer > 0) playerRespawnMsgTimer -= dt;
   }
   draw();
   requestAnimationFrame(loop);
