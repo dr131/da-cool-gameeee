@@ -83,6 +83,18 @@ var SPAWN_TIME    = 5;   // задержка перед первым респа�
 var CAMP_CAPACITY = 5;   // юнитов на лагерь
 var GLOBAL_LIMIT  = 50;  // максимум живых юнитов на карте
 
+// ── Стамина / заряд ─────────────────────────────────────────
+var CHARGE_SPEED   = SPEED * 1.75;
+var STAMINA_MAX    = 100;
+var STAMINA_DRAIN  = 20;  // /сек при заряде
+var STAMINA_REGEN  = 9;   // /сек в покое
+var CHARGE_DIST_T1 = 55;  // тир 1 → +25% урон
+var CHARGE_DIST_T2 = 130; // тир 2 → +55% урон
+var CHARGE_DIST_T3 = 220; // тир 3 → +90% урон + stun 0.4с
+// Глобальный флаг заряда для team 0 (игрок)
+// палец на экране / кнопка зажата = заряд, убрал = марш
+var playerCharging = false;
+
 // team: 0=синий, 1=красный, 2=нейтрал
 var TEAM_COLOR = ['#4488ff', '#ff4444', '#aaaaaa'];
 var TEAM_DARK  = ['#1133aa', '#aa1111', '#555555'];
@@ -160,6 +172,7 @@ function makeUnit(x, y, team, group, isSmall) {
     growTimer: 0, growFrom: 0, growDuration: 0,
     colorTimer: 0, colorFrom: -1, colorDuration: 0,
     blockTimer: 0, outnumberedRounds: 0,
+    stamina: STAMINA_MAX, chargeDist: 0,
     fearStack: 0, fearStackTimer: 3,
     fearBurst: false, fearBurstTimer: 0,
     recentDeathTimes: [], fearPanicTimer: 0,
@@ -343,7 +356,7 @@ function setTarget(team, group, pos) {
 var mouseScrolling = false, mouseScrollX = 0, mouseScrollY = 0;
 canvas.addEventListener('mousedown', e => {
   if (gameOver) { resetGame(); return; }
-  if (e.button === 0) setTarget(0, 0, getPos(e.clientX, e.clientY));
+  if (e.button === 0) { setTarget(0, 0, getPos(e.clientX, e.clientY)); playerCharging = true; }
   if (e.button === 1 || e.button === 2) { mouseScrolling = true; mouseScrollX = e.clientX; mouseScrollY = e.clientY; }
 });
 canvas.addEventListener('mousemove', e => {
@@ -357,15 +370,16 @@ canvas.addEventListener('mousemove', e => {
   }
   if (e.buttons === 1) setTarget(0, 0, getPos(e.clientX, e.clientY));
 });
-canvas.addEventListener('mouseup', () => { mouseScrolling = false; });
+canvas.addEventListener('mouseup', () => { mouseScrolling = false; playerCharging = false; });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 // Блокируем системный скролл iOS — только после load
 document.body.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
 
-// Тач: 1 палец = команда, 3 пальца = скролл, 2 пальца = разделить армию
+// Тач: 1 палец = команда (hold=заряд), 3 пальца = скролл, 2 пальца = разделить армию
 var touchStartX = 0, touchStartY = 0, touchMoved = false, touchScrolling = false;
 var lastTouchX = 0, lastTouchY = 0;
+var touchStartTime = 0;
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
   if (gameOver) { resetGame(); return; }
@@ -374,6 +388,7 @@ canvas.addEventListener('touchstart', e => {
     touchStartY = e.touches[0].clientY;
     lastTouchX = touchStartX; lastTouchY = touchStartY;
     touchMoved = false; touchScrolling = false;
+    playerCharging = true; // держим палец = разгон
     if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
   } else if (e.touches.length === 2) {
     touchScrolling = false;
@@ -417,6 +432,7 @@ canvas.addEventListener('touchend', e => {
     }
     if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
     touchScrolling = false;
+    playerCharging = false;
   }
 });
 
@@ -466,21 +482,39 @@ function fightRound(attacker, target) {
   }
 
   var atkDmg = attacker.atk;
-  var missChance = attacker.retreating ? 0.65 : 0.5;
+
+  // ── Бонус заряда (chargeDist накоплен во время разгона) ───
+  var cd = attacker.chargeDist || 0;
+  var chargeTier = cd >= CHARGE_DIST_T3 ? 3 : cd >= CHARGE_DIST_T2 ? 2 : cd >= CHARGE_DIST_T1 ? 1 : 0;
+  if (chargeTier > 0) {
+    var dmgMult = chargeTier === 1 ? 1.25 : chargeTier === 2 ? 1.55 : 1.9;
+    atkDmg *= dmgMult;
+    // Тир 3: стан вместо обычного удара
+    if (chargeTier === 3 && target.stunTimer === 0) {
+      applyDamage(target, atkDmg);
+      target.stunTimer = 1;
+      target.retreatBlocked = true;
+      attacker.chargeDist = 0;
+      return;
+    }
+    attacker.chargeDist = 0; // разгон потрачен
+  }
+
+  var missChance = attacker.retreating ? 0.65 : (chargeTier >= 2 ? 0.25 : 0.5); // разгон снижает промах
   var canRetreat = false;
 
   if (Math.random() < missChance) {
     canRetreat = true;
   } else {
-    var canBlock = target.stunTimer === 0;
-    if (canBlock && Math.random() < 0.5) {
-      target.blockTimer = 0.35; // анимация щита
+    var canBlock = target.stunTimer === 0 && chargeTier < 3;
+    if (canBlock && Math.random() < (chargeTier >= 1 ? 0.25 : 0.5)) { // блок труднее против разгона
+      target.blockTimer = 0.35;
       canRetreat = true;
     } else {
       canRetreat = false;
       if (Math.random() < 0.5) {
         applyDamage(target, atkDmg * STUN_RATIO);
-        target.stunTimer = 1; // 1 тик = ~0.4с
+        target.stunTimer = 1;
         target.retreatBlocked = true;
       } else {
         applyDamage(target, atkDmg);
@@ -704,9 +738,32 @@ function updateMovement(dt) {
     }
     var dx = tx - u.x, dy = ty - u.y;
     var dist = Math.hypot(dx, dy);
+
+    // ── Стамина и разгон ──────────────────────────────────────
+    var isCharging = (u.team === 0) ? playerCharging : false; // AI не использует заряд
+    if (isCharging && u.stamina > 0 && !u.attacking) {
+      // Разгон: holdTime нарастает пока палец на экране
+      u.holdTime = Math.min((u.holdTime || 0) + dt, 1.5);
+      u.stamina = Math.max(0, u.stamina - STAMINA_DRAIN * dt);
+    } else {
+      u.holdTime = Math.max((u.holdTime || 0) - dt * 2, 0); // замедляемся вдвое быстрее
+      if (!isCharging || u.stamina <= 0) {
+        u.stamina = Math.min(STAMINA_MAX, u.stamina + STAMINA_REGEN * dt);
+      }
+    }
+    // chargeRatio: 0=марш, 1=полный разгон
+    var chargeRatio = (u.holdTime || 0) / 1.5;
+    var maxSpd = SPEED + (CHARGE_SPEED - SPEED) * chargeRatio;
+    // Накапливаем дистанцию разгона (только пока разгоняемся и движемся)
+    if (chargeRatio > 0.1 && dist > 10 && !u.attacking) {
+      u.chargeDist = (u.chargeDist || 0) + maxSpd;
+    } else if (!isCharging || u.attacking) {
+      u.chargeDist = 0; // сбросить после удара или остановки
+    }
+
     if (dist > 4) {
-      u.vx += (dx / dist) * SPEED * 0.15;
-      u.vy += (dy / dist) * SPEED * 0.15;
+      u.vx += (dx / dist) * maxSpd * 0.15;
+      u.vy += (dy / dist) * maxSpd * 0.15;
     }
     forNearby(u.x, u.y, SEP, function(other) {
       if (other === u || !other.alive) return;
@@ -715,14 +772,14 @@ function updateMovement(dt) {
       var ox = u.x - other.x, oy = u.y - other.y;
       var d = Math.hypot(ox, oy);
       if (d < SEP && d > 0) {
-        var factor = other.team === u.team ? 0.12 : 0.04; // враги толкают слабее
+        var factor = other.team === u.team ? 0.12 : 0.04;
         u.vx += (ox / d) * (SEP - d) * factor;
         u.vy += (oy / d) * (SEP - d) * factor;
       }
     });
     u.vx *= 0.85; u.vy *= 0.85;
     var spd = Math.hypot(u.vx, u.vy);
-    if (spd > SPEED) { u.vx = u.vx / spd * SPEED; u.vy = u.vy / spd * SPEED; }
+    if (spd > maxSpd) { u.vx = u.vx / spd * maxSpd; u.vy = u.vy / spd * maxSpd; }
     u.x += u.vx; u.y += u.vy;
     u.x = Math.max(u.radius, Math.min(MAP_W - u.radius, u.x));
     u.y = Math.max(u.radius, Math.min(MAP_H - u.radius, u.y));
@@ -1161,11 +1218,24 @@ function draw() {
   var c0 = teamCamps[0], c1 = teamCamps[1];
   var total = camps.length;
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(0, 0, W, 30);
+  ctx.fillRect(0, 0, W, 34);
   ctx.font = '13px monospace';
-  ctx.textAlign = 'left';  ctx.fillStyle = TEAM_COLOR[0]; ctx.fillText('◉ ' + t0 + '  ⛺' + c0 + '/' + total, 10, 20);
-  ctx.textAlign = 'right'; ctx.fillStyle = TEAM_COLOR[1]; ctx.fillText('⛺' + c1 + '/' + total + '  ' + t1 + ' ◉', W - 10, 20);
-  ctx.textAlign = 'center'; ctx.fillStyle = '#888'; ctx.fillText('VS', W/2, 20);
+  ctx.textAlign = 'left';  ctx.fillStyle = TEAM_COLOR[0]; ctx.fillText('◉ ' + t0 + '  ⛺' + c0 + '/' + total, 10, 18);
+  ctx.textAlign = 'right'; ctx.fillStyle = TEAM_COLOR[1]; ctx.fillText('⛺' + c1 + '/' + total + '  ' + t1 + ' ◉', W - 10, 18);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#888'; ctx.fillText('VS', W/2, 18);
+
+  // Полоска стамины (среднее по синим)
+  var blueUnits = units.filter(function(u){ return u.alive && u.team === 0; });
+  if (blueUnits.length > 0) {
+    var avgStam = blueUnits.reduce(function(s,u){ return s + (u.stamina||STAMINA_MAX); }, 0) / blueUnits.length;
+    var stamRatio = avgStam / STAMINA_MAX;
+    var barW = 80, barH = 4, barX = W/2 - barW/2, barY = 26;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(barX, barY, barW, barH);
+    var stamColor = stamRatio > 0.5 ? '#44ddaa' : stamRatio > 0.25 ? '#ffcc00' : '#ff4444';
+    ctx.fillStyle = stamColor;
+    ctx.fillRect(barX, barY, barW * stamRatio, barH);
+  }
 
 
   if (isSplit) {
