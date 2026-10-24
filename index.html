@@ -1192,8 +1192,8 @@ function updateAI(dt) {
     tx = MAP_W - 150; ty = MAP_H / 2;
   }
 
-  targets[1][0] = { x: tx, y: ty };
-  targets[1][1] = { x: tx, y: ty };
+  setTarget(1, 0, { x: tx, y: ty });
+  setTarget(1, 1, { x: tx, y: ty });
 }
 
 var last = 0, gameTime = 0;
