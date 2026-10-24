@@ -67,7 +67,7 @@ var camX = 0, camY = 0;
 var camTargetX = 0, camTargetY = 0;
 
 var SPEED       = 2.2;
-var SEP         = 38;
+var SEP         = 30;
 var MAX_ARMY    = 40; // максимум бойцов на команду (без охранников баз)
 var FIGHT_RANGE = 5;
 var ROUND_TIME  = 0.4;
@@ -674,11 +674,14 @@ function updateMovement(dt) {
     }
     forNearby(u.x, u.y, SEP, function(other) {
       if (other === u || !other.alive) return;
+      // Союзники — всегда разделяем; врагов разделяем только если не атакуем их
+      if (other.team !== u.team && (u.attacking === other || other.attacking === u)) return;
       var ox = u.x - other.x, oy = u.y - other.y;
       var d = Math.hypot(ox, oy);
       if (d < SEP && d > 0) {
-        u.vx += (ox / d) * (SEP - d) * 0.12;
-        u.vy += (oy / d) * (SEP - d) * 0.12;
+        var factor = other.team === u.team ? 0.12 : 0.04; // враги толкают слабее
+        u.vx += (ox / d) * (SEP - d) * factor;
+        u.vy += (oy / d) * (SEP - d) * factor;
       }
     });
     u.vx *= 0.85; u.vy *= 0.85;
