@@ -79,6 +79,36 @@ var SPAWN_TIME  = 20;
 var TEAM_COLOR = ['#4488ff', '#ff4444', '#aaaaaa'];
 var TEAM_DARK  = ['#1133aa', '#aa1111', '#555555'];
 
+// ── Spatial grid ───────────────────────────────────────────
+var GRID_CELL = 64;
+var GRID_COLS = Math.ceil(MAP_W / GRID_CELL);
+var GRID_ROWS = Math.ceil(MAP_H / GRID_CELL);
+var spatialGrid = new Array(GRID_COLS * GRID_ROWS);
+function buildGrid() {
+  for (var _i = 0; _i < spatialGrid.length; _i++) spatialGrid[_i] = null;
+  for (var _j = 0; _j < units.length; _j++) {
+    var _u = units[_j];
+    if (!_u.alive) continue;
+    var _cx = Math.floor(_u.x / GRID_CELL); if (_cx < 0) _cx = 0; if (_cx >= GRID_COLS) _cx = GRID_COLS-1;
+    var _cy = Math.floor(_u.y / GRID_CELL); if (_cy < 0) _cy = 0; if (_cy >= GRID_ROWS) _cy = GRID_ROWS-1;
+    var _idx = _cy * GRID_COLS + _cx;
+    _u._next = spatialGrid[_idx];
+    spatialGrid[_idx] = _u;
+  }
+}
+function forNearby(x, y, r, fn) {
+  var mnX = Math.floor((x-r)/GRID_CELL); if (mnX<0) mnX=0;
+  var mxX = Math.floor((x+r)/GRID_CELL); if (mxX>=GRID_COLS) mxX=GRID_COLS-1;
+  var mnY = Math.floor((y-r)/GRID_CELL); if (mnY<0) mnY=0;
+  var mxY = Math.floor((y+r)/GRID_CELL); if (mxY>=GRID_ROWS) mxY=GRID_ROWS-1;
+  for (var _cy2=mnY; _cy2<=mxY; _cy2++) {
+    for (var _cx2=mnX; _cx2<=mxX; _cx2++) {
+      var _u2=spatialGrid[_cy2*GRID_COLS+_cx2];
+      while(_u2){fn(_u2);_u2=_u2._next;}
+    }
+  }
+}
+
 // ── Color helpers ──────────────────────────────────────────
 function hexToRgb(hex) {
   return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
@@ -126,7 +156,7 @@ function makeUnit(x, y, team, group, isSmall) {
     fearBurst: false, fearBurstTimer: 0,
     recentDeathTimes: [], fearPanicTimer: 0,
     wavering: false, waveringTimer: 0, waveringCourage: 0, _waveringCaptor: null,
-    waveringHit: false,
+    waveringHit: false, _next: null,
   };
 }
 
@@ -474,10 +504,11 @@ function panicCheck(unit) {
 
   // Паника при низком HP: шанс снижается от числа союзников рядом
   if (unit.hp / unit.maxHp < 0.3) {
-    var nearAllies = units.filter(u =>
-      u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
-      Math.hypot(u.x - unit.x, u.y - unit.y) < 150
-    ).length;
+    var nearAllies = 0;
+    forNearby(unit.x, unit.y, 150, function(u) {
+      if (u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
+          Math.hypot(u.x - unit.x, u.y - unit.y) < 150) nearAllies++;
+    });
     // Базовый шанс выше: 0 союзников=35%, 1=20%, 2=13%, 4=8%
     var chance = 0.35 / (1 + nearAllies * 0.6);
     if (Math.random() < chance) retreatUnit(unit);
@@ -565,10 +596,11 @@ function retreatUnit(unit) {
     if (w._waveringCaptor && unit.team === w._waveringCaptor.team) return;
     w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.25);
   });
-  var allies = units.filter(u =>
-    u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
-    Math.hypot(u.x - unit.x, u.y - unit.y) < 200
-  );
+  var allies = [];
+  forNearby(unit.x, unit.y, 200, function(u) {
+    if (u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
+        Math.hypot(u.x - unit.x, u.y - unit.y) < 200) allies.push(u);
+  });
   if (allies.length === 0) {
     captureUnit(unit);
   } else {
@@ -634,7 +666,7 @@ function updateMovement(dt) {
       u.vx += (dx / dist) * SPEED * 0.15;
       u.vy += (dy / dist) * SPEED * 0.15;
     }
-    units.forEach(other => {
+    forNearby(u.x, u.y, SEP, function(other) {
       if (other === u || !other.alive) return;
       var ox = u.x - other.x, oy = u.y - other.y;
       var d = Math.hypot(ox, oy);
@@ -664,7 +696,7 @@ function updateCombat(dt) {
   units.forEach(a => {
     if (!a.alive || a.attacking !== null) return;
     var best = null, bestDist = Infinity;
-    units.forEach(b => {
+    forNearby(a.x, a.y, FIGHT_RANGE + a.radius + 20, function(b) {
       if (!b.alive || !isEnemy(a, b)) return;
       var d = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
       if (d < FIGHT_RANGE && d < bestDist) { best = b; bestDist = d; }
@@ -822,26 +854,32 @@ function resetGame() {
   initUnits();
 }
 
+// ── Prerender background ────────────────────────────────────
+var bgCanvas = document.createElement('canvas');
+bgCanvas.width = MAP_W; bgCanvas.height = MAP_H;
+var bgCtx = bgCanvas.getContext('2d');
+bgCtx.fillStyle = '#1a1a2e';
+bgCtx.fillRect(0, 0, MAP_W, MAP_H);
+bgCtx.strokeStyle = 'rgba(255,255,255,0.03)';
+bgCtx.lineWidth = 1;
+var _gs = 120;
+for (var _gx = 0; _gx < MAP_W; _gx += _gs) {
+  bgCtx.beginPath(); bgCtx.moveTo(_gx, 0); bgCtx.lineTo(_gx, MAP_H); bgCtx.stroke();
+}
+for (var _gy = 0; _gy < MAP_H; _gy += _gs) {
+  bgCtx.beginPath(); bgCtx.moveTo(0, _gy); bgCtx.lineTo(MAP_W, _gy); bgCtx.stroke();
+}
+
 // ── Draw ───────────────────────────────────────────────────
 function draw() {
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#1a1a2e';
-  ctx.fillRect(0, 0, W, H);
+  var _cx = Math.round(camX), _cy2 = Math.round(camY);
+
+  // Рисуем нужный кусок предрендеренного фона
+  ctx.drawImage(bgCanvas, _cx, _cy2, W, H, 0, 0, W, H);
 
   // Применяем камеру
   ctx.save();
-  ctx.translate(-Math.round(camX), -Math.round(camY));
-
-  // Сетка фона
-  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
-  ctx.lineWidth = 1;
-  var gs = 120;
-  for (var gx = 0; gx < MAP_W; gx += gs) {
-    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, MAP_H); ctx.stroke();
-  }
-  for (var gy = 0; gy < MAP_H; gy += gs) {
-    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(MAP_W, gy); ctx.stroke();
-  }
+  ctx.translate(-_cx, -_cy2);
 
   // Центральная линия мира
   ctx.strokeStyle = 'rgba(255,255,255,0.06)';
@@ -892,6 +930,9 @@ function draw() {
   // Юниты
   units.forEach(u => {
     if (!u.alive) return;
+    // Viewport culling — не рисуем что вне экрана
+    var _pad = 30;
+    if (u.x < camX - _pad || u.x > camX + W + _pad || u.y < camY - _pad || u.y > camY + H + _pad) return;
     var sx = Math.abs(u.shakeX) > 0.3 ? u.shakeX : 0;
     var sy = Math.abs(u.shakeY) > 0.3 ? u.shakeY : 0;
     var rx = u.x + sx, ry = u.y + sy;
@@ -1099,7 +1140,9 @@ function loop(ts) {
   last = ts;
   gameTime += dt;
   if (!gameOver) {
+    buildGrid();
     updateMovement(dt);
+    buildGrid();
     updateCombat(dt);
     updateCamps(dt);
     checkVictory();
