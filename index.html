@@ -1135,10 +1135,7 @@ function updateCamera(dt) {
 }
 
 var last = 0, gameTime = 0;
-var TARGET_FPS = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 30 : 60;
-var FRAME_MS = 1000 / TARGET_FPS;
 function loop(ts) {
-  if (ts - last < FRAME_MS - 2) { requestAnimationFrame(loop); return; }
   var dt = Math.min((ts - last) / 1000, 0.05);
   last = ts;
   gameTime += dt;
