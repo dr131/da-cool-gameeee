@@ -199,14 +199,14 @@ function spawnNeutralGuards(camp) {
   });
 }
 
-function spawnCampUnit(camp) {
+function spawnCampUnit(camp, doWait) {
   // Глобальный лимит — используем кэш, не перебираем массив
   if (aliveCount >= GLOBAL_LIMIT) return false;
   var nx = camp.x + (Math.random() - 0.5) * 30;
   var ny = camp.y + (Math.random() - 0.5) * 30;
   var g = makeUnit(nx, ny, camp.team, 0);
   g.homecamp = camp;
-  g.waiting = true;   // ждёт у лагеря, пока не подойдёт своя армия
+  g.waiting = !!doWait;  // подкрепления ждут у лагеря, начальная армия — нет
   units.push(g);
   aliveCount++; teamAlive[camp.team]++;
   if (units.length > 500) units = units.filter(function(u) { return u.alive; });
@@ -258,7 +258,7 @@ function updateCamps(dt) {
     if (camp.pending > 0) {
       camp.spawnTimer -= dt;
       if (camp.spawnTimer <= 0) {
-        if (spawnCampUnit(camp)) {
+        if (spawnCampUnit(camp, true)) { // подкрепление — ждёт у лагеря
           camp.pending--;
           camp.spawnTimer = camp.pending > 0 ? 5 : 0; // 5с между бойцами в партии
         } else {
