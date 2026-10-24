@@ -216,15 +216,24 @@ function updateCamps(dt) {
     camp.spawnTimer -= dt;
     if (camp.spawnTimer <= 0) {
       camp.spawnTimer = SPAWN_TIME;
-      var armyCount = units.filter(function(u) { return u.alive && u.team === camp.team && !u.campGuard; }).length;
-      if (armyCount < MAX_ARMY) {
+      // Считаем ВСЕ живые юниты команды (включая охранников)
+      var teamTotal = 0;
+      for (var _tc = 0; _tc < units.length; _tc++) {
+        if (units[_tc].alive && units[_tc].team === camp.team) teamTotal++;
+      }
+      // Не спавним если уже есть охранник у этого лагеря или армия полная
+      var hasGuard = false;
+      for (var _hg = 0; _hg < units.length; _hg++) {
+        if (units[_hg].alive && units[_hg].campGuard === camp) { hasGuard = true; break; }
+      }
+      if (!hasGuard && teamTotal < MAX_ARMY) {
         var nx = camp.x + (Math.random() - 0.5) * 20;
         var ny = camp.y + (Math.random() - 0.5) * 20;
         var g = makeUnit(nx, ny, camp.team, 0, true);
         g.campGuard = camp;
         units.push(g);
-        // Также периодически чистим мёртвых из массива
-        if (units.length > 300) units = units.filter(function(u) { return u.alive; });
+        // Периодически чистим мёртвых из массива
+        if (units.length > 400) units = units.filter(function(u) { return u.alive; });
       }
     }
 
