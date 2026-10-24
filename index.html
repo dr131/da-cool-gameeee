@@ -168,13 +168,19 @@ function makeUnit(x, y, team, group, isSmall) {
 // ── Camps ──────────────────────────────────────────────────
 var camps = [];
 var units = [];
+// Кэшированные счётчики — обновляем при рождении/смерти/захвате
+var aliveCount = 0;          // всего живых юнитов
+var teamAlive  = [0, 0, 0];  // по командам
+var teamCamps  = [0, 0];     // лагеря по командам
 
 function makeCamps() {
   var my = MAP_H / 2;
   camps = [];
+  teamCamps[0] = teamCamps[1] = 0;
   // Домашние базы команд (изначально захвачены)
   camps.push({ x: 80,       y: my, team: 0, radius: 22, capacity: CAMP_CAPACITY, pending: CAMP_CAPACITY, spawnTimer: 0, isBase: true });
   camps.push({ x: MAP_W-80, y: my, team: 1, radius: 22, capacity: CAMP_CAPACITY, pending: CAMP_CAPACITY, spawnTimer: 0, isBase: true });
+  teamCamps[0]++; teamCamps[1]++;
   // Нейтральные лагеря
   CAMP_POS.forEach(function(p) {
     camps.push({ x: p.x, y: p.y, team: -1, radius: 18, capacity: CAMP_CAPACITY, pending: 0, spawnTimer: 0 });
@@ -189,25 +195,27 @@ function spawnNeutralGuards(camp) {
     g.isNeutral = true;
     g.homecamp  = camp;
     units.push(g);
+    aliveCount++; teamAlive[2]++;
   });
 }
 
 function spawnCampUnit(camp) {
-  // Глобальный лимит: не больше GLOBAL_LIMIT живых юнитов
-  var alive = 0;
-  for (var _gl = 0; _gl < units.length; _gl++) if (units[_gl].alive) alive++;
-  if (alive >= GLOBAL_LIMIT) return false;
+  // Глобальный лимит — используем кэш, не перебираем массив
+  if (aliveCount >= GLOBAL_LIMIT) return false;
   var nx = camp.x + (Math.random() - 0.5) * 30;
   var ny = camp.y + (Math.random() - 0.5) * 30;
   var g = makeUnit(nx, ny, camp.team, 0);
   g.homecamp = camp;
   units.push(g);
+  aliveCount++; teamAlive[camp.team]++;
   if (units.length > 500) units = units.filter(function(u) { return u.alive; });
   return true;
 }
 
 function capturecamp(camp, team) {
+  if (camp.team >= 0) teamCamps[camp.team]--;
   camp.team = team;
+  if (camp.team >= 0) teamCamps[camp.team]++;
   camp.pending = camp.capacity; // очередь на спавн полного отряда
   camp.spawnTimer = 1;          // первый боец через 1 сек
 }
@@ -217,39 +225,32 @@ function updateCamps(dt) {
     // Нейтральный лагерь: охранники убиты → захват
     if (camp.team === -1) {
       var hasNeutral = false;
-      for (var _ng = 0; _ng < units.length; _ng++) {
-        if (units[_ng].alive && units[_ng].homecamp === camp && units[_ng].isNeutral) { hasNeutral = true; break; }
-      }
+      forNearby(camp.x, camp.y, camp.radius + 20, function(_u) {
+        if (_u.alive && _u.homecamp === camp && _u.isNeutral) hasNeutral = true;
+      });
       if (!hasNeutral) {
-        for (var _cap = 0; _cap < units.length; _cap++) {
-          var _u = units[_cap];
-          if (_u.alive && !_u.isNeutral && _u.team !== 2 &&
-              Math.hypot(_u.x - camp.x, _u.y - camp.y) < camp.radius + 30) {
-            capturecamp(camp, _u.team);
-            break;
-          }
-        }
+        var captor = null;
+        forNearby(camp.x, camp.y, camp.radius + 30, function(_u) {
+          if (!captor && _u.alive && !_u.isNeutral && _u.team !== 2 &&
+              Math.hypot(_u.x - camp.x, _u.y - camp.y) < camp.radius + 30) captor = _u;
+        });
+        if (captor) capturecamp(camp, captor.team);
       }
       return;
     }
 
     // Захваченный лагерь: уязвим если нет дружественных юнитов рядом
     var friendNear = false;
-    for (var _fn = 0; _fn < units.length; _fn++) {
-      var _f = units[_fn];
-      if (_f.alive && _f.team === camp.team && Math.hypot(_f.x - camp.x, _f.y - camp.y) < camp.radius + 50) {
-        friendNear = true; break;
-      }
-    }
+    forNearby(camp.x, camp.y, camp.radius + 50, function(_f) {
+      if (_f.alive && _f.team === camp.team) friendNear = true;
+    });
     if (!friendNear) {
-      for (var _ec = 0; _ec < units.length; _ec++) {
-        var _e = units[_ec];
-        if (_e.alive && _e.team !== camp.team && _e.team !== 2 &&
-            Math.hypot(_e.x - camp.x, _e.y - camp.y) < camp.radius + 30) {
-          capturecamp(camp, _e.team);
-          return; // team changed, skip spawn this tick
-        }
-      }
+      var enemy = null;
+      forNearby(camp.x, camp.y, camp.radius + 30, function(_e) {
+        if (!enemy && _e.alive && _e.team !== camp.team && _e.team !== 2 &&
+            Math.hypot(_e.x - camp.x, _e.y - camp.y) < camp.radius + 30) enemy = _e;
+      });
+      if (enemy) { capturecamp(camp, enemy.team); return; }
     }
 
     // Спавн из очереди
@@ -271,6 +272,7 @@ function updateCamps(dt) {
 function initUnits() {
   var my = MAP_H / 2;
   units = [];
+  aliveCount = 0; teamAlive[0] = 0; teamAlive[1] = 0; teamAlive[2] = 0;
   // Нейтральные лагеря получают охранников
   camps.forEach(function(c) { if (c.team === -1) spawnNeutralGuards(c); });
   // Домашние базы сразу спавнят своих бойцов
@@ -564,8 +566,8 @@ function surrenderSmall(unit, captor) {
   disengageUnit(unit);
   unit.campGuard = null;
   unit.isNeutral = false;
-  unit.colorFrom = 2;          // из серого
-  unit.team = captor.team;
+  unit.colorFrom = 2;
+  teamAlive[unit.team]--; unit.team = captor.team; teamAlive[unit.team]++;
   unit.group = 0;
   unit.hp = 1.5; unit.maxHp = 3;
   // Вырастает и меняет цвет
@@ -584,33 +586,31 @@ function killUnit(unit) {
   disengageUnit(unit);
   unit.alive = false;
   unit.hp = 0;
+  aliveCount--;
+  teamAlive[unit.team] = Math.max(0, teamAlive[unit.team] - 1);
   // Уведомляем homecamp — нужен новый боец (если лагерь ещё наш)
   if (unit.homecamp && unit.homecamp.team === unit.team && !unit.isNeutral) {
     unit.homecamp.pending++;
     if (unit.homecamp.spawnTimer <= 0) unit.homecamp.spawnTimer = SPAWN_TIME;
   }
-  // Если убит противник — добавляем courage колеблющимся нейтралам рядом
-  units.forEach(function(w) {
-    if (!w.alive || !w.wavering || !w.isNeutral) return;
-    if (Math.hypot(w.x - unit.x, w.y - unit.y) > 120) return;
-    // Противник убит рядом → +0.35 courage
-    if (w._waveringCaptor && unit.team !== w._waveringCaptor.team) return; // это союзник капитора — не считаем
-    w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.35);
-  });
-  // Уведомляем союзников рядом — копим страх
-  units.forEach(function(ally) {
-    if (!ally.alive || ally === unit || ally.team !== unit.team || ally.isNeutral) return;
-    if (Math.hypot(ally.x - unit.x, ally.y - unit.y) > 150) return;
-    ally.fearStack = Math.min((ally.fearStack || 0) + 1, 6);
-    ally.fearStackTimer = 3;
-    if (!ally.recentDeathTimes) ally.recentDeathTimes = [];
-    ally.recentDeathTimes.push(gameTime);
-    // Убираем старые смерти (> 2с назад)
-    ally.recentDeathTimes = ally.recentDeathTimes.filter(function(t) { return gameTime - t < 2; });
-    // fearBurst: 3+ смерти за 2 секунды → ужас
-    if (ally.recentDeathTimes.length >= 3) {
-      ally.fearBurst = true;
-      ally.fearBurstTimer = 4;
+  // Уведомляем ближних через пространственную сетку
+  forNearby(unit.x, unit.y, 150, function(w) {
+    if (!w.alive || w === unit) return;
+    var d = Math.hypot(w.x - unit.x, w.y - unit.y);
+    // Courage колеблющимся нейтралам
+    if (w.wavering && w.isNeutral && d <= 120) {
+      if (!w._waveringCaptor || unit.team === w._waveringCaptor.team) {
+        w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.35);
+      }
+    }
+    // Страх союзникам
+    if (w.team === unit.team && !w.isNeutral && d <= 150) {
+      w.fearStack = Math.min((w.fearStack || 0) + 1, 6);
+      w.fearStackTimer = 3;
+      if (!w.recentDeathTimes) w.recentDeathTimes = [];
+      w.recentDeathTimes.push(gameTime);
+      w.recentDeathTimes = w.recentDeathTimes.filter(function(t) { return gameTime - t < 2; });
+      if (w.recentDeathTimes.length >= 3) { w.fearBurst = true; w.fearBurstTimer = 4; }
     }
   });
 }
@@ -628,10 +628,9 @@ function retreatUnit(unit) {
   }
   if (unit.isNeutral) return;
   // Не-нейтрал убегает → добавляем courage нейтралам, которые колеблются рядом
-  units.forEach(function(w) {
+  forNearby(unit.x, unit.y, 120, function(w) {
     if (!w.alive || !w.wavering || !w.isNeutral) return;
     if (Math.hypot(w.x - unit.x, w.y - unit.y) > 120) return;
-    // Если это противник капитора — он убегает, хорошо
     if (w._waveringCaptor && unit.team === w._waveringCaptor.team) return;
     w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.25);
   });
@@ -654,8 +653,10 @@ function retreatUnit(unit) {
 function captureUnit(unit) {
   if (unit.isNeutral) return;
   disengageUnit(unit);
-  unit.colorFrom = unit.team; // запоминаем старый цвет до смены
+  unit.colorFrom = unit.team;
+  teamAlive[unit.team]--;
   unit.team = 1 - unit.team;
+  teamAlive[unit.team]++;
   unit.group = 0;
   unit.hp = Math.ceil(unit.maxHp * 0.5);
   unit.retreating = false;
@@ -855,13 +856,9 @@ function updateCombat(dt) {
 // ── Victory ────────────────────────────────────────────────
 function checkVictory() {
   if (gameOver) return;
-  var t0 = units.filter(u => u.alive && u.team === 0).length;
-  var t1 = units.filter(u => u.alive && u.team === 1).length;
-  var c0 = camps.filter(c => c.team === 0).length;
-  var c1 = camps.filter(c => c.team === 1).length;
   var total = camps.length;
-  if (t1 === 0 || c0 === total) gameOver = 'blue';
-  if (t0 === 0 || c1 === total) gameOver = 'red';
+  if (teamAlive[1] === 0 || teamCamps[0] === total) gameOver = 'blue';
+  if (teamAlive[0] === 0 || teamCamps[1] === total) gameOver = 'red';
 }
 
 function resetGame() {
@@ -1093,11 +1090,9 @@ function draw() {
   // Конец мирового пространства — возврат к экранным координатам
   ctx.restore();
 
-  // HUD
-  var t0 = units.filter(u => u.alive && u.team === 0).length;
-  var t1 = units.filter(u => u.alive && u.team === 1).length;
-  var c0 = camps.filter(c => c.team === 0).length;
-  var c1 = camps.filter(c => c.team === 1).length;
+  // HUD — используем кэшированные счётчики
+  var t0 = teamAlive[0], t1 = teamAlive[1];
+  var c0 = teamCamps[0], c1 = teamCamps[1];
   var total = camps.length;
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
   ctx.fillRect(0, 0, W, 30);
