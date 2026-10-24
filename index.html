@@ -299,6 +299,11 @@ var groupRetreating = [[false, false], [false, false]];
 var isSplit = false;
 var gameOver = null;
 
+// Переключение командования — когда армия игрока уничтожена
+var playerRespawnCamp = null;   // лагерь, откуда игрок командует резервом
+var playerRespawnMsg  = '';     // сообщение на экране
+var playerRespawnMsgTimer = 0;
+
 makeCamps();
 initUnits();
 
@@ -872,12 +877,52 @@ function updateCombat(dt) {
   });
 }
 
-// ── Victory ────────────────────────────────────────────────
+// ── Victory / смена командования ───────────────────────────
 function checkVictory() {
   if (gameOver) return;
   var total = camps.length;
+
+  // Смерть всех активных юнитов синих — ищем лагерь с резервистами
+  if (teamAlive[0] === 0) {
+    // Есть ли синие лагеря с ждущими резервистами?
+    var reserveCamps = [];
+    for (var _vc = 0; _vc < camps.length; _vc++) {
+      var _camp = camps[_vc];
+      if (_camp.team !== 0) continue;
+      var hasWaiting = false;
+      for (var _vu = 0; _vu < units.length; _vu++) {
+        var _u2 = units[_vu];
+        if (_u2.alive && _u2.team === 0 && _u2.waiting && _u2.homecamp === _camp) { hasWaiting = true; break; }
+      }
+      if (hasWaiting) reserveCamps.push(_camp);
+    }
+    if (reserveCamps.length > 0) {
+      // Выбираем случайный лагерь с резервом — игрок теперь командует ими
+      var newCamp = reserveCamps[Math.floor(Math.random() * reserveCamps.length)];
+      playerRespawnCamp = newCamp;
+      // Активируем резервистов (снимаем waiting)
+      for (var _wu = 0; _wu < units.length; _wu++) {
+        var _w = units[_wu];
+        if (_w.alive && _w.team === 0 && _w.waiting && _w.homecamp === newCamp) {
+          _w.waiting = false;
+        }
+      }
+      // Переносим цель к лагерю
+      targets[0][0] = { x: newCamp.x, y: newCamp.y };
+      targets[0][1] = { x: newCamp.x, y: newCamp.y };
+      // Двигаем камеру к лагерю
+      camTargetX = Math.max(0, Math.min(MAP_W - W / ZOOM, newCamp.x - W / ZOOM / 2));
+      camTargetY = Math.max(0, Math.min(MAP_H - H / ZOOM, newCamp.y - H / ZOOM / 2));
+      playerRespawnMsg = 'РЕЗЕРВ ПРИНЯЛ КОМАНДОВАНИЕ';
+      playerRespawnMsgTimer = 4.0;
+      return; // не конец игры — продолжаем
+    }
+    // Нет резерва — конец
+    gameOver = 'red';
+  }
+
   if (teamAlive[1] === 0 || teamCamps[0] === total) gameOver = 'blue';
-  if (teamAlive[0] === 0 || teamCamps[1] === total) gameOver = 'red';
+  if (teamCamps[1] === total) gameOver = 'red';
 }
 
 function resetGame() {
@@ -886,6 +931,8 @@ function resetGame() {
   targets[1][0] = targets[1][1] = { x: MAP_W-80,  y: MAP_H/2 };
   groupRetreating[0][0] = groupRetreating[0][1] = false;
   groupRetreating[1][0] = groupRetreating[1][1] = false;
+  playerRespawnCamp = null; playerRespawnMsg = ''; playerRespawnMsgTimer = 0;
+  aiMode = 'camp'; aiModeTimer = 0; aiTimer = 0;
   makeCamps();
   initUnits();
 }
@@ -1138,6 +1185,22 @@ function draw() {
     ctx.fillText(hint, W/2, H - 14);
   }
 
+  // Сообщение о смене командования
+  if (playerRespawnMsgTimer > 0) {
+    var msgAlpha = Math.min(1, playerRespawnMsgTimer);
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,' + (msgAlpha * 0.7).toFixed(2) + ')';
+    ctx.fillRect(0, H/2 - 40, W, 80);
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(80,180,255,' + msgAlpha.toFixed(2) + ')';
+    ctx.fillText(playerRespawnMsg, W/2, H/2 - 8);
+    ctx.font = '13px monospace';
+    ctx.fillStyle = 'rgba(180,220,255,' + msgAlpha.toFixed(2) + ')';
+    ctx.fillText('Командуй резервом у лагеря', W/2, H/2 + 16);
+    ctx.restore();
+  }
+
   // Конец игры
   if (gameOver) {
     ctx.fillStyle = 'rgba(0,0,0,0.72)';
@@ -1244,13 +1307,35 @@ function updateAI(dt) {
   flankX = Math.max(50, Math.min(MAP_W - 50, flankX));
   flankY = Math.max(50, Math.min(MAP_H - 50, flankY));
 
+  // Лагерь красных с ждущими резервистами (ближайший к центру масс красных)
+  var rallyTarget = null, rallyDist = Infinity;
+  for (var _rc = 0; _rc < camps.length; _rc++) {
+    var _rc2 = camps[_rc];
+    if (_rc2.team !== 1) continue;
+    var hasWaiting2 = false;
+    for (var _rw = 0; _rw < units.length; _rw++) {
+      var _wr = units[_rw];
+      if (_wr.alive && _wr.team === 1 && _wr.waiting && _wr.homecamp === _rc2) { hasWaiting2 = true; break; }
+    }
+    if (hasWaiting2) {
+      var _rd = Math.hypot(_rc2.x - rx, _rc2.y - ry);
+      if (_rd < rallyDist) { rallyDist = _rd; rallyTarget = _rc2; }
+    }
+  }
+
   var tx, ty, chosenMode;
 
   if (ratio < 0.55) {
-    // Сильно уступаем — отступаем на базу
-    tx = MAP_W - 80; ty = MAP_H / 2;
-    chosenMode = 'retreat';
-    aiTimer = 1.5;
+    // Сильно уступаем — сначала пробуем собрать резерв
+    if (rallyTarget) {
+      tx = rallyTarget.x; ty = rallyTarget.y;
+      chosenMode = 'rally';
+      aiTimer = 1.5;
+    } else {
+      tx = MAP_W - 80; ty = MAP_H / 2;
+      chosenMode = 'retreat';
+      aiTimer = 1.5;
+    }
   } else if (raidTarget && guardCount <= 1 && ratio >= 0.9 && aiModeTimer <= 0) {
     // Рейд: незащищённая или слабо защищённая база синих
     tx = raidTarget.x; ty = raidTarget.y;
@@ -1307,6 +1392,7 @@ function loop(ts) {
     updateAI(dt);
     checkVictory();
     updateCamera(dt);
+    if (playerRespawnMsgTimer > 0) playerRespawnMsgTimer -= dt;
   }
   draw();
   requestAnimationFrame(loop);
