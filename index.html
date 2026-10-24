@@ -74,7 +74,7 @@ var ROUND_TIME  = 0.4;
 var REGEN_RATE  = 0.25;
 var ATK_DMG     = 1;
 var STUN_RATIO  = 0.5;
-var SPAWN_TIME  = 20;
+var SPAWN_TIME  = 30;
 
 // team: 0=синий, 1=красный, 2=нейтрал
 var TEAM_COLOR = ['#4488ff', '#ff4444', '#aaaaaa'];
@@ -642,14 +642,27 @@ function captureUnit(unit) {
 
 // ── Movement ───────────────────────────────────────────────
 function updateMovement(dt) {
-  // Охранник лагеря присоединяется к армии если рядом есть союзники
+  // Охранник лагеря присоединяется к армии если рядом есть союзники И нет врагов у лагеря
   units.forEach(u => {
     if (!u.alive || !u.campGuard || u.isNeutral || isFighting(u)) return;
+    // Не уходить если враг близко к лагерю (защищать базу)
+    var camp = u.campGuard;
+    var enemyNearCamp = false;
+    for (var _en = 0; _en < units.length; _en++) {
+      var _e = units[_en];
+      if (_e.alive && _e.team !== u.team && _e.team !== 2 &&
+          Math.hypot(_e.x - camp.x, _e.y - camp.y) < camp.radius + 60) {
+        enemyNearCamp = true; break;
+      }
+    }
+    if (enemyNearCamp) return; // остаётся защищать
     var nearAlly = units.find(a =>
       a !== u && a.alive && a.team === u.team && !a.campGuard &&
-      Math.hypot(a.x - u.x, a.y - u.y) < 80
+      Math.hypot(a.x - u.x, a.y - u.y) < 60
     );
     if (nearAlly) {
+      // При уходе охранника — ускоряем спавн замены (5с вместо 20с)
+      if (camp.spawnTimer > 5) camp.spawnTimer = 5;
       u.campGuard = null; // отлипает — присоединяется к армии
       if (u.isSmall) {
         // маленький охранник вырастает
