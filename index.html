@@ -67,7 +67,8 @@ var camX = 0, camY = 0;
 var camTargetX = 0, camTargetY = 0;
 
 var SPEED       = 2.2;
-var SEP         = 32;
+var SEP         = 38;
+var MAX_ARMY    = 40; // максимум бойцов на команду (без охранников баз)
 var FIGHT_RANGE = 5;
 var ROUND_TIME  = 0.4;
 var REGEN_RATE  = 0.25;
@@ -211,15 +212,20 @@ function updateCamps(dt) {
       return;
     }
 
-    // Захваченный лагерь: тикаем спавн
+    // Захваченный лагерь: тикаем спавн (только если армия не переполнена)
     camp.spawnTimer -= dt;
     if (camp.spawnTimer <= 0) {
       camp.spawnTimer = SPAWN_TIME;
-      var nx = camp.x + (Math.random() - 0.5) * 20;
-      var ny = camp.y + (Math.random() - 0.5) * 20;
-      var g = makeUnit(nx, ny, camp.team, 0, true); // маленький охранник — вырастет при присоединении к армии
-      g.campGuard = camp; // остаётся охранять базу пока не подойдёт союзник
-      units.push(g);
+      var armyCount = units.filter(function(u) { return u.alive && u.team === camp.team && !u.campGuard; }).length;
+      if (armyCount < MAX_ARMY) {
+        var nx = camp.x + (Math.random() - 0.5) * 20;
+        var ny = camp.y + (Math.random() - 0.5) * 20;
+        var g = makeUnit(nx, ny, camp.team, 0, true);
+        g.campGuard = camp;
+        units.push(g);
+        // Также периодически чистим мёртвых из массива
+        if (units.length > 300) units = units.filter(function(u) { return u.alive; });
+      }
     }
 
     // Если охранника нет — враг может перехватить
@@ -671,8 +677,8 @@ function updateMovement(dt) {
       var ox = u.x - other.x, oy = u.y - other.y;
       var d = Math.hypot(ox, oy);
       if (d < SEP && d > 0) {
-        u.vx += (ox / d) * (SEP - d) * 0.05;
-        u.vy += (oy / d) * (SEP - d) * 0.05;
+        u.vx += (ox / d) * (SEP - d) * 0.12;
+        u.vy += (oy / d) * (SEP - d) * 0.12;
       }
     });
     u.vx *= 0.85; u.vy *= 0.85;
@@ -1138,62 +1144,72 @@ function updateCamera(dt) {
 var aiTimer = 0;
 var AI_INTERVAL = 2.0; // решение каждые 2 секунды
 
+var aiLog = '';
 function updateAI(dt) {
   aiTimer -= dt;
   if (aiTimer > 0) return;
   aiTimer = AI_INTERVAL;
 
-  var reds = units.filter(function(u) { return u.alive && u.team === 1 && !u.retreating; });
-  var blues = units.filter(function(u) { return u.alive && u.team === 0; });
+  var reds = [], blues = [];
+  for (var _ai = 0; _ai < units.length; _ai++) {
+    var _u = units[_ai];
+    if (!_u.alive) continue;
+    if (_u.team === 1 && !_u.retreating) reds.push(_u);
+    if (_u.team === 0) blues.push(_u);
+  }
   if (reds.length === 0) return;
 
   // Центр масс красных
-  var rx = reds.reduce(function(s,u){return s+u.x;},0)/reds.length;
-  var ry = reds.reduce(function(s,u){return s+u.y;},0)/reds.length;
+  var rx = 0, ry = 0;
+  for (var _r = 0; _r < reds.length; _r++) { rx += reds[_r].x; ry += reds[_r].y; }
+  rx /= reds.length; ry /= reds.length;
 
-  // Соотношение сил
   var ratio = reds.length / Math.max(1, blues.length);
 
   // Ближайший синий
   var nearestBlue = null, nearestBlueDist = Infinity;
-  blues.forEach(function(b) {
-    var d = Math.hypot(b.x - rx, b.y - ry);
-    if (d < nearestBlueDist) { nearestBlueDist = d; nearestBlue = b; }
-  });
+  for (var _b = 0; _b < blues.length; _b++) {
+    var _d = Math.hypot(blues[_b].x - rx, blues[_b].y - ry);
+    if (_d < nearestBlueDist) { nearestBlueDist = _d; nearestBlue = blues[_b]; }
+  }
 
-  // Незащищённые нейтральные лагеря (нет охранников)
-  var openCamps = camps.filter(function(c) {
-    if (c.team === 1) return false; // уже наш
-    var guards = units.filter(function(u) { return u.alive && u.campGuard === c && u.isNeutral; });
-    return guards.length === 0;
-  });
-
-  // Ближайший открытый не-наш лагерь
+  // Незащищённые лагеря не нашей команды
   var targetCamp = null, targetCampDist = Infinity;
-  openCamps.forEach(function(c) {
-    var d = Math.hypot(c.x - rx, c.y - ry);
-    if (d < targetCampDist) { targetCampDist = d; targetCamp = c; }
-  });
+  for (var _c = 0; _c < camps.length; _c++) {
+    var camp = camps[_c];
+    if (camp.team === 1) continue;
+    var hasGuard = false;
+    for (var _g = 0; _g < units.length; _g++) {
+      var _ug = units[_g];
+      if (_ug.alive && _ug.campGuard === camp && _ug.isNeutral) { hasGuard = true; break; }
+    }
+    if (!hasGuard) {
+      var _cd = Math.hypot(camp.x - rx, camp.y - ry);
+      if (_cd < targetCampDist) { targetCampDist = _cd; targetCamp = camp; }
+    }
+  }
 
   var tx, ty;
-
-  if (ratio < 0.6 && nearestBlue) {
-    // Сильно уступаем — отступаем к своей базе
+  if (ratio < 0.6) {
     tx = MAP_W - 80; ty = MAP_H / 2;
-    aiTimer = 1.0; // чаще переоцениваем когда опасно
+    aiTimer = 1.0;
   } else if (targetCamp && (ratio > 1.3 || targetCampDist < 300)) {
-    // Перевес или лагерь близко — захватываем лагерь
     tx = targetCamp.x; ty = targetCamp.y;
-  } else if (nearestBlue && ratio >= 0.6) {
-    // Атакуем ближайшего синего
+  } else if (nearestBlue) {
     tx = nearestBlue.x; ty = nearestBlue.y;
   } else {
-    // Держимся у своей базы
     tx = MAP_W - 150; ty = MAP_H / 2;
   }
 
-  setTarget(1, 0, { x: tx, y: ty });
-  setTarget(1, 1, { x: tx, y: ty });
+  aiLog = 'AI: r=' + reds.length + ' b=' + blues.length + ' tx=' + Math.round(tx);
+  targets[1][0] = { x: tx, y: ty };
+  targets[1][1] = { x: tx, y: ty };
+  // Сбрасываем флаг отступления у красных
+  for (var _rr = 0; _rr < units.length; _rr++) {
+    if (units[_rr].alive && units[_rr].team === 1 && !units[_rr].campGuard) {
+      if (ratio >= 0.6) units[_rr].retreating = false;
+    }
+  }
 }
 
 var last = 0, gameTime = 0;
