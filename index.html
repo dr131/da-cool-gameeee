@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Tactics</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
+  body { display: flex; justify-content: center; align-items: center; }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<div id="dbg" style="display:none;position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:12px;font-size:13px;z-index:9999;word-break:break-all"></div>
+<canvas id="c"></canvas>
+<div id="splash" style="position:fixed;inset:0;background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;cursor:pointer;">
+  <div style="font-size:48px;margin-bottom:16px;">⚔️</div>
+  <div style="color:#fff;font-size:28px;font-family:monospace;font-weight:bold;letter-spacing:2px;">TACTICS</div>
+  <div style="color:#aaa;font-size:15px;font-family:monospace;margin-top:32px;">нажми чтобы начать</div>
+</div>
+<script>
+// Глобальный обработчик ошибок — показывает красную плашку на iOS
+window.onerror = function(msg, src, line, col, err) {
+  var d = document.getElementById('dbg');
+  if (d) { d.style.display = 'block'; d.textContent = 'ERR line ' + line + ': ' + msg; }
+  return true;
+};
+
+window.addEventListener('load', function() {
+
+// Авто-старт через 150мс — iOS успевает устоять viewport
+setTimeout(function() {
+  try { initGame(); } catch(e) {
+    var d = document.getElementById('dbg');
+    if (d) { d.style.display='block'; d.textContent='ERR: '+e.message+'\n'+(e.stack||'').slice(0,300); }
+  }
+}, 150);
+
+function initGame() {
+
+var splash = document.getElementById('splash');
+if (splash) splash.style.display = 'none';
+
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+
+// screen.width — CSS-пиксели, самое надёжное на iOS
+var rawW = Math.min(screen.width  || window.innerWidth  || 375, 800);
+var rawH = Math.min(screen.height || window.innerHeight || 600, 700);
+if (rawW < 50) rawW = 375;
+if (rawH < 50) rawH = 600;
+
+canvas.width  = rawW;
+canvas.height = rawH;
+canvas.style.width  = rawW + 'px';
+canvas.style.height = rawH + 'px';
+
+var W = canvas.width, H = canvas.height;
+// Мировые координаты — карта больше экрана
+var MAP_W = 1600, MAP_H = 1200;
+
+// Камера
+var camX = 0, camY = 0;
+var camTargetX = 0, camTargetY = 0;
+
+var SPEED       = 2.2;
+var SEP         = 32;
+var FIGHT_RANGE = 5;
+var ROUND_TIME  = 0.4;
+var REGEN_RATE  = 0.25;
+var ATK_DMG     = 1;
+var STUN_RATIO  = 0.5;
+var SPAWN_TIME  = 20;
+
+// team: 0=синий, 1=красный, 2=нейтрал
+var TEAM_COLOR = ['#4488ff', '#ff4444', '#aaaaaa'];
+var TEAM_DARK  = ['#1133aa', '#aa1111', '#555555'];
+
+// ── Color helpers ──────────────────────────────────────────
+function hexToRgb(hex) {
+  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+}
+function lerpColor(hexA, hexB, t) {
+  var a = hexToRgb(hexA), b = hexToRgb(hexB);
+  return 'rgb('+Math.round(a[0]+(b[0]-a[0])*t)+','+Math.round(a[1]+(b[1]-a[1])*t)+','+Math.round(a[2]+(b[2]-a[2])*t)+')';
+}
+
+var CAMP_POS = [
+  { x: MAP_W*0.5,  y: MAP_H*0.5  },   // центр
+  { x: MAP_W*0.25, y: MAP_H*0.3  },   // лево-верх
+  { x: MAP_W*0.75, y: MAP_H*0.3  },   // право-верх
+  { x: MAP_W*0.25, y: MAP_H*0.7  },   // лево-низ
+  { x: MAP_W*0.75, y: MAP_H*0.7  },   // право-низ
+  { x: MAP_W*0.5,  y: MAP_H*0.2  },   // верх-центр
+  { x: MAP_W*0.5,  y: MAP_H*0.8  },   // низ-центр
+];
+
+// ── Unit factory ───────────────────────────────────────────
+function makeUnit(x, y, team, group, isSmall) {
+  return {
+    x, y, vx: 0, vy: 0,
+    hp: isSmall ? 2.1 : 3,
+    maxHp: isSmall ? 2.1 : 3,
+    atk: isSmall ? 0.25 : ATK_DMG,
+    team, group,
+    radius: isSmall ? 9 : 14,
+    isSmall: !!isSmall,
+    alive: true,
+    retreating: false,
+    fighters: [],
+    attacking: null,
+    fightTimer: 0,
+    regenTimer: 0,
+    flashTimer: 0,
+    shakeX: 0, shakeY: 0,
+    stunTimer: 0,
+    retreatBlocked: false,
+    campGuard: null, isNeutral: false,
+    growTimer: 0, growFrom: 0, growDuration: 0,
+    colorTimer: 0, colorFrom: -1, colorDuration: 0,
+    blockTimer: 0, outnumberedRounds: 0,
+    fearStack: 0, fearStackTimer: 3,
+    fearBurst: false, fearBurstTimer: 0,
+    recentDeathTimes: [], fearPanicTimer: 0,
+    wavering: false, waveringTimer: 0, waveringCourage: 0, _waveringCaptor: null,
+    waveringHit: false,
+  };
+}
+
+// ── Camps ──────────────────────────────────────────────────
+var camps = [];
+var units = [];
+
+function makeCamps() {
+  camps = CAMP_POS.map(p => ({
+    x: p.x, y: p.y,
+    team: -1,            // -1 = нейтральный (никем не захвачен)
+    spawnTimer: SPAWN_TIME,
+    radius: 18,
+  }));
+}
+
+function spawnNeutralGuards(camp) {
+  // 2 нейтральных охранника немного разнесены
+  var offsets = [{ x: -14, y: -10 }, { x: 14, y: 10 }];
+  offsets.forEach(off => {
+    var g = makeUnit(camp.x + off.x, camp.y + off.y, 2, 0, true);
+    g.campGuard  = camp;
+    g.isNeutral  = true;
+    units.push(g);
+  });
+}
+
+function capturecamp(camp, team) {
+  camp.team = team;
+  camp.spawnTimer = SPAWN_TIME;
+  // Убираем всех старых охранников
+  units = units.filter(u => u.campGuard !== camp);
+  // Сразу спавним одного нормального бойца на базе
+  var g = makeUnit(camp.x, camp.y, team, 0); // normal size
+  g.campGuard = camp;
+  units.push(g);
+}
+
+function updateCamps(dt) {
+  camps.forEach(camp => {
+    // Нейтральный лагерь: проверяем не захвачен ли он (нейтральные охранники убиты)
+    if (camp.team === -1) {
+      var neutralGuards = units.filter(u => u.alive && u.campGuard === camp && u.isNeutral);
+      if (neutralGuards.length === 0) {
+        // Охранников нет — любой живой враг рядом захватывает
+        var captor = units.find(u =>
+          u.alive && !u.isNeutral && u.team !== 2 &&
+          Math.hypot(u.x - camp.x, u.y - camp.y) < camp.radius + 25
+        );
+        if (captor) capturecamp(camp, captor.team);
+      }
+      return;
+    }
+
+    // Захваченный лагерь: тикаем спавн
+    camp.spawnTimer -= dt;
+    if (camp.spawnTimer <= 0) {
+      camp.spawnTimer = SPAWN_TIME;
+      var nx = camp.x + (Math.random() - 0.5) * 20;
+      var ny = camp.y + (Math.random() - 0.5) * 20;
+      var g = makeUnit(nx, ny, camp.team, 0, true); // маленький охранник — вырастет при присоединении к армии
+      g.campGuard = camp; // остаётся охранять базу пока не подойдёт союзник
+      units.push(g);
+    }
+
+    // Если охранника нет — враг может перехватить
+    var guard = units.find(u => u.alive && u.campGuard === camp && !u.isNeutral);
+    if (!guard) {
+      var enemy = units.find(u =>
+        u.alive && u.team !== camp.team && u.team !== 2 &&
+        Math.hypot(u.x - camp.x, u.y - camp.y) < camp.radius + 25
+      );
+      if (enemy) capturecamp(camp, enemy.team);
+    }
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────
+function initUnits() {
+  var my = MAP_H / 2;
+  units = [
+    makeUnit(80,        my-40, 0, 0), makeUnit(80,        my,    0, 0),
+    makeUnit(80,        my+40, 0, 0), makeUnit(50,        my-20, 0, 0),
+    makeUnit(50,        my+20, 0, 0),
+    makeUnit(MAP_W-80,  my-40, 1, 0), makeUnit(MAP_W-80,  my,    1, 0),
+    makeUnit(MAP_W-80,  my+40, 1, 0), makeUnit(MAP_W-50,  my-20, 1, 0),
+    makeUnit(MAP_W-50,  my+20, 1, 0),
+  ];
+  camps.forEach(c => spawnNeutralGuards(c));
+  // Камера стартует у синих
+  camX = camTargetX = 0;
+  camY = camTargetY = Math.max(0, my - H / 2);
+}
+
+var targets = [
+  [{ x: 80,        y: MAP_H/2 }, { x: 80,        y: MAP_H/2 }],
+  [{ x: MAP_W-80,  y: MAP_H/2 }, { x: MAP_W-80,  y: MAP_H/2 }],
+];
+var groupRetreating = [[false, false], [false, false]];
+var isSplit = false;
+var gameOver = null;
+
+makeCamps();
+initUnits();
+
+// ── Retreat detection ──────────────────────────────────────
+function checkRetreat(pos, team, group) {
+  var mine = units.filter(u => u.team === team && u.alive && u.group === group);
+  if (!mine.length) return false;
+  var cx = mine.reduce((s, u) => s + u.x, 0) / mine.length;
+  var cy = mine.reduce((s, u) => s + u.y, 0) / mine.length;
+  var enemies = units.filter(u => u.team !== team && u.team !== 2 && u.alive);
+  if (!enemies.length) return false;
+  var closest = enemies[0];
+  enemies.forEach(e => {
+    if (Math.hypot(e.x - cx, e.y - cy) < Math.hypot(closest.x - cx, closest.y - cy))
+      closest = e;
+  });
+  var toEnemy  = { x: closest.x - cx, y: closest.y - cy };
+  var toTarget = { x: pos.x - cx,     y: pos.y - cy     };
+  var dot = toEnemy.x * toTarget.x + toEnemy.y * toTarget.y;
+  var lenE = Math.hypot(toEnemy.x, toEnemy.y);
+  var lenT = Math.hypot(toTarget.x, toTarget.y);
+  if (lenE < 60 || lenT < 20) return false;
+  return dot / (lenE * lenT) < -0.5;
+}
+
+function setTarget(team, group, pos) {
+  targets[team][group] = pos;
+  groupRetreating[team][group] = checkRetreat(pos, team, group);
+  units.forEach(u => {
+    if (u.team === team && u.group === group)
+      u.retreating = groupRetreating[team][group];
+  });
+}
+
+// ── Input ──────────────────────────────────────────────────
+// Скролл камеры мышью (ПКМ или средняя кнопка)
+var mouseScrolling = false, mouseScrollX = 0, mouseScrollY = 0;
+canvas.addEventListener('mousedown', e => {
+  if (gameOver) { resetGame(); return; }
+  if (e.button === 0) setTarget(0, 0, getPos(e.clientX, e.clientY));
+  if (e.button === 1 || e.button === 2) { mouseScrolling = true; mouseScrollX = e.clientX; mouseScrollY = e.clientY; }
+});
+canvas.addEventListener('mousemove', e => {
+  if (gameOver) return;
+  if (mouseScrolling) {
+    camX = Math.max(0, Math.min(MAP_W - W, camX - (e.clientX - mouseScrollX)));
+    camY = Math.max(0, Math.min(MAP_H - H, camY - (e.clientY - mouseScrollY)));
+    camTargetX = camX; camTargetY = camY;
+    mouseScrollX = e.clientX; mouseScrollY = e.clientY;
+    return;
+  }
+  if (e.buttons === 1) setTarget(0, 0, getPos(e.clientX, e.clientY));
+});
+canvas.addEventListener('mouseup', () => { mouseScrolling = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// Блокируем системный скролл iOS — только после load
+document.body.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+
+// Тач: 1 палец = команда, 3 пальца = скролл, 2 пальца = разделить армию
+var touchStartX = 0, touchStartY = 0, touchMoved = false, touchScrolling = false;
+var lastTouchX = 0, lastTouchY = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (gameOver) { resetGame(); return; }
+  if (e.touches.length === 1) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    lastTouchX = touchStartX; lastTouchY = touchStartY;
+    touchMoved = false; touchScrolling = false;
+    if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
+  } else if (e.touches.length === 2) {
+    touchScrolling = false;
+    if (!isSplit) splitArmy();
+    setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
+    setTarget(0, 1, getPos(e.touches[1].clientX, e.touches[1].clientY));
+  } else if (e.touches.length === 3) {
+    // 3 пальца = скролл камеры
+    touchScrolling = true;
+    lastTouchX = e.touches[0].clientX;
+    lastTouchY = e.touches[0].clientY;
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (gameOver) return;
+  if (e.touches.length === 3 || touchScrolling) {
+    var dx = e.touches[0].clientX - lastTouchX;
+    var dy = e.touches[0].clientY - lastTouchY;
+    camX = Math.max(0, Math.min(MAP_W - W, camX - dx));
+    camY = Math.max(0, Math.min(MAP_H - H, camY - dy));
+    camTargetX = camX; camTargetY = camY;
+    lastTouchX = e.touches[0].clientX;
+    lastTouchY = e.touches[0].clientY;
+    return;
+  }
+  if (e.touches.length === 1) {
+    var d = Math.hypot(e.touches[0].clientX - touchStartX, e.touches[0].clientY - touchStartY);
+    if (d > 8) touchMoved = true;
+    if (touchMoved) setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
+    lastTouchX = e.touches[0].clientX; lastTouchY = e.touches[0].clientY;
+  } else if (e.touches.length === 2) {
+    setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
+    setTarget(0, 1, getPos(e.touches[1].clientX, e.touches[1].clientY));
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  if (e.touches.length === 0) {
+    if (!touchMoved && !touchScrolling) {
+      setTarget(0, 0, getPos(lastTouchX, lastTouchY));
+    }
+    if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
+    touchScrolling = false;
+  }
+});
+
+function getPos(clientX, clientY) {
+  var r = canvas.getBoundingClientRect();
+  return { x: clientX - r.left + camX, y: clientY - r.top + camY };
+}
+
+function splitArmy() {
+  isSplit = true;
+  var alive = units.filter(u => u.team === 0 && u.alive);
+  alive.forEach((u, i) => { u.group = i < Math.ceil(alive.length / 2) ? 0 : 1; });
+}
+
+// ── Combat helpers ─────────────────────────────────────────
+function isFighting(u) {
+  return u.attacking !== null || u.fighters.length > 0;
+}
+
+function isEnemy(a, b) {
+  // Нейтрал (2) — враг обоих; 0 и 1 — враги друг друга
+  if (a.team === b.team) return false;
+  if (a.team === 2 || b.team === 2) return true; // нейтрал дерётся со всеми
+  return true; // разные команды
+}
+
+function disengageUnit(u) {
+  if (u.attacking) {
+    var t = u.attacking;
+    t.fighters = t.fighters.filter(f => f !== u);
+    u.attacking = null;
+  }
+  u.fighters.forEach(f => { f.attacking = null; });
+  u.fighters = [];
+  u.retreating = false;
+}
+
+// ── Combat round ───────────────────────────────────────────
+function fightRound(attacker, target) {
+  if (!attacker.alive || !target.alive) return;
+
+  if (attacker.stunTimer > 0) {
+    attacker.stunTimer--;
+    return;
+  }
+
+  var atkDmg = attacker.atk;
+  var missChance = attacker.retreating ? 0.65 : 0.5;
+  var canRetreat = false;
+
+  if (Math.random() < missChance) {
+    canRetreat = true;
+  } else {
+    var canBlock = target.stunTimer === 0;
+    if (canBlock && Math.random() < 0.5) {
+      target.blockTimer = 0.35; // анимация щита
+      canRetreat = true;
+    } else {
+      canRetreat = false;
+      if (Math.random() < 0.5) {
+        applyDamage(target, atkDmg * STUN_RATIO);
+        target.stunTimer = 1; // 1 тик = ~0.4с
+        target.retreatBlocked = true;
+      } else {
+        applyDamage(target, atkDmg);
+        target.retreatBlocked = true;
+      }
+    }
+  }
+
+  // Отступление с рывком: 100% если не получил удар, 30% через удар (риск удара в спину)
+  if (attacker.retreating && !attacker.isNeutral) {
+    if (attacker.stunTimer === 0) {
+      var dashChance = canRetreat ? 1.0 : 0.3;
+      if (Math.random() < dashChance) {
+        if (!canRetreat && target.alive && Math.random() < 0.5) {
+          applyDamage(attacker, target.atk * 0.5);
+        }
+        retreatUnit(attacker);
+      } else {
+        attacker.retreatBlocked = true;
+      }
+    } else {
+      attacker.retreatBlocked = true;
+    }
+  }
+
+  if (target.retreating && target.stunTimer > 0 && !target.isNeutral) {
+    target.retreatBlocked = true;
+  }
+
+  panicCheck(attacker);
+  panicCheck(target);
+
+  // Нейтральный маленький: оглушён и остался один → сдаётся
+  if (target.alive && target.isNeutral && target.isSmall && target.stunTimer > 0) {
+    var neutralAllies = units.filter(function(u) {
+      return u !== target && u.alive && u.isNeutral && Math.hypot(u.x - target.x, u.y - target.y) < 120;
+    });
+    if (neutralAllies.length === 0) {
+      retreatUnit(target); // уйдёт в startWavering
+    }
+  }
+}
+
+function applyDamage(unit, dmg) {
+  if (!unit.alive) return;
+  unit.hp = Math.max(0, unit.hp - dmg);
+  unit.flashTimer = 0.2;
+  unit.shakeX = (Math.random() - 0.5) * 6;
+  unit.shakeY = (Math.random() - 0.5) * 6;
+  if (unit.wavering) unit.waveringHit = true; // удар во время колебания → мгновенная сдача
+  if (unit.hp <= 0) killUnit(unit);
+}
+
+function panicCheck(unit) {
+  if (!unit.alive || !isFighting(unit) || unit.isNeutral) return;
+
+  // Перевес 4:1 → паника после 3 раундов под таким давлением
+  if (unit.fighters.length >= 3) {
+    unit.outnumberedRounds = (unit.outnumberedRounds || 0) + 1;
+    if (unit.outnumberedRounds >= 3) {
+      unit.outnumberedRounds = 0;
+      retreatUnit(unit);
+      return;
+    }
+  } else {
+    unit.outnumberedRounds = 0; // давление спало — сброс
+  }
+
+  // Паника при низком HP: шанс снижается от числа союзников рядом
+  if (unit.hp / unit.maxHp < 0.3) {
+    var nearAllies = units.filter(u =>
+      u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
+      Math.hypot(u.x - unit.x, u.y - unit.y) < 150
+    ).length;
+    // Базовый шанс выше: 0 союзников=35%, 1=20%, 2=13%, 4=8%
+    var chance = 0.35 / (1 + nearAllies * 0.6);
+    if (Math.random() < chance) retreatUnit(unit);
+  }
+}
+
+function startWavering(unit, captor) {
+  // Вместо мгновенной сдачи — период колебания
+  if (unit.wavering) return; // уже колеблется
+  unit.wavering = true;
+  unit.waveringTimer = 2.0;    // 2 секунды на раздумье
+  unit.waveringCourage = 0;    // накапливается от событий рядом
+  unit._waveringCaptor = captor;
+  unit.waveringHit = false;
+}
+
+function surrenderSmall(unit, captor) {
+  // Нейтральный маленький охранник сдаётся победителю
+  disengageUnit(unit);
+  unit.campGuard = null;
+  unit.isNeutral = false;
+  unit.colorFrom = 2;          // из серого
+  unit.team = captor.team;
+  unit.group = 0;
+  unit.hp = 1.5; unit.maxHp = 3;
+  // Вырастает и меняет цвет
+  unit.growFrom = unit.radius; // = 9
+  unit.growTimer = 1.5;
+  unit.growDuration = 1.5;
+  unit.colorTimer = 1.5;
+  unit.colorDuration = 1.5;
+  unit.isSmall = false;
+  unit.atk = ATK_DMG;
+  unit.flashTimer = 0.4; // белая вспышка в момент сдачи
+  unit.hp = unit.maxHp * 0.5; // восстанавливаем до 50% hp
+}
+
+function killUnit(unit) {
+  disengageUnit(unit);
+  unit.alive = false;
+  unit.hp = 0;
+  // Если убит противник — добавляем courage колеблющимся нейтралам рядом
+  units.forEach(function(w) {
+    if (!w.alive || !w.wavering || !w.isNeutral) return;
+    if (Math.hypot(w.x - unit.x, w.y - unit.y) > 120) return;
+    // Противник убит рядом → +0.35 courage
+    if (w._waveringCaptor && unit.team !== w._waveringCaptor.team) return; // это союзник капитора — не считаем
+    w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.35);
+  });
+  // Уведомляем союзников рядом — копим страх
+  units.forEach(function(ally) {
+    if (!ally.alive || ally === unit || ally.team !== unit.team || ally.isNeutral) return;
+    if (Math.hypot(ally.x - unit.x, ally.y - unit.y) > 150) return;
+    ally.fearStack = Math.min((ally.fearStack || 0) + 1, 6);
+    ally.fearStackTimer = 3;
+    if (!ally.recentDeathTimes) ally.recentDeathTimes = [];
+    ally.recentDeathTimes.push(gameTime);
+    // Убираем старые смерти (> 2с назад)
+    ally.recentDeathTimes = ally.recentDeathTimes.filter(function(t) { return gameTime - t < 2; });
+    // fearBurst: 3+ смерти за 2 секунды → ужас
+    if (ally.recentDeathTimes.length >= 3) {
+      ally.fearBurst = true;
+      ally.fearBurstTimer = 4;
+    }
+  });
+}
+
+function retreatUnit(unit) {
+  if (!unit.alive) return;
+  // Нейтральный маленький — паника = колебание, потом сдача
+  if (unit.isNeutral && unit.isSmall) {
+    if (unit.wavering) return; // уже колеблется, не дублируем
+    var captor = unit.fighters.length > 0 ? unit.fighters[0] : null;
+    if (!captor) captor = units.find(function(u) {
+      return u.alive && !u.isNeutral && Math.hypot(u.x - unit.x, u.y - unit.y) < 80;
+    });
+    if (captor) { startWavering(unit, captor); return; }
+  }
+  if (unit.isNeutral) return;
+  // Не-нейтрал убегает → добавляем courage нейтралам, которые колеблются рядом
+  units.forEach(function(w) {
+    if (!w.alive || !w.wavering || !w.isNeutral) return;
+    if (Math.hypot(w.x - unit.x, w.y - unit.y) > 120) return;
+    // Если это противник капитора — он убегает, хорошо
+    if (w._waveringCaptor && unit.team === w._waveringCaptor.team) return;
+    w.waveringCourage = Math.min(1, (w.waveringCourage || 0) + 0.25);
+  });
+  var allies = units.filter(u =>
+    u !== unit && u.alive && u.team === unit.team && !u.isNeutral &&
+    Math.hypot(u.x - unit.x, u.y - unit.y) < 200
+  );
+  if (allies.length === 0) {
+    captureUnit(unit);
+  } else {
+    disengageUnit(unit);
+    // Юнит лично бежит к базе — не двигаем цель всей группы
+    unit.retreating = true;
+    unit._retreatX = unit.team === 0 ? 60 : MAP_W - 60;
+    unit._retreatY = MAP_H / 2;
+  }
+}
+
+function captureUnit(unit) {
+  if (unit.isNeutral) return;
+  disengageUnit(unit);
+  unit.colorFrom = unit.team; // запоминаем старый цвет до смены
+  unit.team = 1 - unit.team;
+  unit.group = 0;
+  unit.hp = Math.ceil(unit.maxHp * 0.5);
+  unit.retreating = false;
+  unit.stunTimer = 0;
+  unit.colorTimer = 5;
+  unit.colorDuration = 5;
+}
+
+// ── Movement ───────────────────────────────────────────────
+function updateMovement(dt) {
+  // Охранник лагеря присоединяется к армии если рядом есть союзники
+  units.forEach(u => {
+    if (!u.alive || !u.campGuard || u.isNeutral || isFighting(u)) return;
+    var nearAlly = units.find(a =>
+      a !== u && a.alive && a.team === u.team && !a.campGuard &&
+      Math.hypot(a.x - u.x, a.y - u.y) < 80
+    );
+    if (nearAlly) {
+      u.campGuard = null; // отлипает — присоединяется к армии
+      if (u.isSmall) {
+        // маленький охранник вырастает
+        u.growFrom = u.radius;
+        u.growTimer = 1.5;
+        u.growDuration = 1.5;
+        u.colorFrom = 2;
+        u.colorTimer = 1.5;
+        u.colorDuration = 1.5;
+        u.hp = 3; u.maxHp = 3; u.atk = ATK_DMG; u.isSmall = false;
+      }
+      // нормальный боец просто отлипает, характеристики уже полные
+    }
+  });
+
+  units.forEach(u => {
+    if (!u.alive || isFighting(u) || u.campGuard) return; // охранники стоят на месте
+    // Личное отступление: юнит бежит к своей базе, не тянет всю группу
+    var tx, ty;
+    if (u.retreating && u._retreatX !== undefined) {
+      tx = u._retreatX; ty = u._retreatY;
+    } else {
+      tx = targets[u.team][u.group] ? targets[u.team][u.group].x : u.x;
+      ty = targets[u.team][u.group] ? targets[u.team][u.group].y : u.y;
+    }
+    var dx = tx - u.x, dy = ty - u.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist > 4) {
+      u.vx += (dx / dist) * SPEED * 0.15;
+      u.vy += (dy / dist) * SPEED * 0.15;
+    }
+    units.forEach(other => {
+      if (other === u || !other.alive) return;
+      var ox = u.x - other.x, oy = u.y - other.y;
+      var d = Math.hypot(ox, oy);
+      if (d < SEP && d > 0) {
+        u.vx += (ox / d) * (SEP - d) * 0.05;
+        u.vy += (oy / d) * (SEP - d) * 0.05;
+      }
+    });
+    u.vx *= 0.85; u.vy *= 0.85;
+    var spd = Math.hypot(u.vx, u.vy);
+    if (spd > SPEED) { u.vx = u.vx / spd * SPEED; u.vy = u.vy / spd * SPEED; }
+    u.x += u.vx; u.y += u.vy;
+    u.x = Math.max(u.radius, Math.min(MAP_W - u.radius, u.x));
+    u.y = Math.max(u.radius, Math.min(MAP_H - u.radius, u.y));
+    // Дошёл до базы — снимаем личное отступление
+    if (u.retreating && u._retreatX !== undefined) {
+      if (Math.hypot(u.x - u._retreatX, u.y - u._retreatY) < 30) {
+        u.retreating = false;
+        u._retreatX = undefined;
+      }
+    }
+  });
+}
+
+// ── Combat update ──────────────────────────────────────────
+function updateCombat(dt) {
+  units.forEach(a => {
+    if (!a.alive || a.attacking !== null) return;
+    var best = null, bestDist = Infinity;
+    units.forEach(b => {
+      if (!b.alive || !isEnemy(a, b)) return;
+      var d = Math.hypot(a.x - b.x, a.y - b.y) - a.radius - b.radius;
+      if (d < FIGHT_RANGE && d < bestDist) { best = b; bestDist = d; }
+    });
+    if (best) {
+      a.attacking = best;
+      best.fighters.push(a);
+      a.fightTimer = 0;
+    }
+  });
+
+  units.forEach(u => {
+    if (!u.alive || u.attacking === null) return;
+    var target = u.attacking;
+    if (!target.alive) { disengageUnit(u); return; }
+    u.fightTimer += dt;
+    if (u.fightTimer >= ROUND_TIME) {
+      u.fightTimer = 0;
+      u.retreatBlocked = false;
+      target.retreatBlocked = false;
+      fightRound(u, target);
+    }
+    var d = Math.hypot(u.x - target.x, u.y - target.y) - u.radius - target.radius;
+    if (d > FIGHT_RANGE * 3) disengageUnit(u);
+  });
+
+  units.forEach(u => {
+    if (!u.alive) return;
+    u.shakeX *= 0.7; u.shakeY *= 0.7;
+    if (u.flashTimer > 0) u.flashTimer -= dt;
+    if (u.blockTimer > 0) u.blockTimer = Math.max(0, u.blockTimer - dt);
+    if (u.colorTimer > 0) u.colorTimer = Math.max(0, u.colorTimer - dt);
+    // stunTimer: если юнит вне боя — сбрасываем по времени (0.4с/тик)
+    if (u.stunTimer > 0 && !isFighting(u)) {
+      u.stunTimer = Math.max(0, u.stunTimer - dt / 0.4);
+    }
+    // Анимация роста резервиста: плавный pop 9→20→14
+    if (u.growTimer > 0) {
+      u.growTimer = Math.max(0, u.growTimer - dt);
+      var dur = u.growDuration || 3;
+      var t = 1 - u.growTimer / dur; // 0→1
+      var PEAK = 20, TARGET = 14;
+      var BURST = 0.55; // первые 55% — нарастание до пика, остальные — оседание
+      var r;
+      if (t < BURST) {
+        // ease-out нарастание: быстро в начале, замедляется у пика
+        var e = 1 - Math.pow(1 - t / BURST, 2);
+        r = u.growFrom + (PEAK - u.growFrom) * e;
+      } else {
+        // пружинное оседание к целевому
+        var s = (t - BURST) / (1 - BURST); // 0→1
+        var spring = 1 - (1 - s) * Math.cos(s * Math.PI * 1.5) * (1 - s);
+        r = PEAK - (PEAK - TARGET) * Math.min(1, spring);
+      }
+      u.radius = r;
+      if (u.growTimer === 0) u.radius = TARGET;
+    }
+  });
+
+  // ── Wavering: колеблющиеся нейтральные юниты ────────────────
+  units.forEach(function(u) {
+    if (!u.alive || !u.wavering) return;
+    u.waveringTimer -= dt;
+
+    // Получил удар во время колебания → мгновенная сдача
+    if (u.waveringHit) {
+      u.wavering = false; u.waveringHit = false;
+      var cap = u._waveringCaptor;
+      if (!cap || !cap.alive) cap = units.find(function(v) {
+        return v.alive && !v.isNeutral && Math.hypot(v.x - u.x, v.y - u.y) < 80;
+      });
+      if (cap) surrenderSmall(u, cap);
+      return;
+    }
+
+    // Courage: союзник убил врага рядом или враг отступил рядом — добавляется извне (см. killUnit / retreatUnit)
+    // Если накопил courage → оправился
+    if (u.waveringCourage >= 1.0) {
+      u.wavering = false;
+      u.waveringCourage = 0;
+      u.flashTimer = 0.3; // белая вспышка — устоял
+      return;
+    }
+
+    // Таймер истёк → сдаётся
+    if (u.waveringTimer <= 0) {
+      u.wavering = false;
+      var cap2 = u._waveringCaptor;
+      if (!cap2 || !cap2.alive) cap2 = units.find(function(v) {
+        return v.alive && !v.isNeutral && Math.hypot(v.x - u.x, v.y - u.y) < 80;
+      });
+      if (cap2) surrenderSmall(u, cap2);
+    }
+  });
+
+  // Страх и ужас — тикаем для всех живых юнитов
+  units.forEach(u => {
+    if (!u.alive || u.isNeutral) return;
+    // Спад fearStack: -1 каждые 3с
+    if (u.fearStack > 0) {
+      u.fearStackTimer -= dt;
+      if (u.fearStackTimer <= 0) { u.fearStack--; u.fearStackTimer = 3; }
+    }
+    // Спад fearBurst
+    if (u.fearBurst) {
+      u.fearBurstTimer -= dt;
+      if (u.fearBurstTimer <= 0) u.fearBurst = false;
+    }
+    // Проверка паники от страха (раз в секунду)
+    if (u.fearStack >= 2 || u.fearBurst) {
+      u.fearPanicTimer += dt;
+      if (u.fearPanicTimer >= 1) {
+        u.fearPanicTimer = 0;
+        var chance = 0;
+        if (u.fearBurst && u.fearStack >= 3) chance = 0.85;
+        else if (u.fearBurst)               chance = 0.60;
+        else if (u.fearStack >= 4)          chance = 0.35;
+        else if (u.fearStack >= 3)          chance = 0.20;
+        else                                chance = 0.10;
+        if (Math.random() < chance) retreatUnit(u);
+      }
+    } else {
+      u.fearPanicTimer = 0;
+    }
+  });
+
+  units.forEach(u => {
+    if (!u.alive || isFighting(u)) return;
+    if (u.hp < u.maxHp) {
+      u.regenTimer += dt;
+      if (u.regenTimer >= 1) { u.hp = Math.min(u.maxHp, u.hp + REGEN_RATE); u.regenTimer = 0; }
+    }
+  });
+}
+
+// ── Victory ────────────────────────────────────────────────
+function checkVictory() {
+  if (gameOver) return;
+  var t0 = units.filter(u => u.alive && u.team === 0).length;
+  var t1 = units.filter(u => u.alive && u.team === 1).length;
+  var c0 = camps.filter(c => c.team === 0).length;
+  var c1 = camps.filter(c => c.team === 1).length;
+  var total = camps.length;
+  if (t1 === 0 || c0 === total) gameOver = 'blue';
+  if (t0 === 0 || c1 === total) gameOver = 'red';
+}
+
+function resetGame() {
+  gameOver = null; isSplit = false;
+  targets[0][0] = targets[0][1] = { x: 80,        y: MAP_H/2 };
+  targets[1][0] = targets[1][1] = { x: MAP_W-80,  y: MAP_H/2 };
+  groupRetreating[0][0] = groupRetreating[0][1] = false;
+  groupRetreating[1][0] = groupRetreating[1][1] = false;
+  makeCamps();
+  initUnits();
+}
+
+// ── Draw ───────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, W, H);
+
+  // Применяем камеру
+  ctx.save();
+  ctx.translate(-Math.round(camX), -Math.round(camY));
+
+  // Сетка фона
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  var gs = 120;
+  for (var gx = 0; gx < MAP_W; gx += gs) {
+    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, MAP_H); ctx.stroke();
+  }
+  for (var gy = 0; gy < MAP_H; gy += gs) {
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(MAP_W, gy); ctx.stroke();
+  }
+
+  // Центральная линия мира
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.moveTo(MAP_W/2, 0); ctx.lineTo(MAP_W/2, MAP_H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Лагеря
+  camps.forEach(camp => {
+    var col = camp.team === -1 ? '#888866' :
+                camp.team === 0  ? TEAM_COLOR[0] : TEAM_COLOR[1];
+    ctx.beginPath();
+    ctx.arc(camp.x, camp.y, camp.radius, 0, Math.PI * 2);
+    ctx.fillStyle = col + '33';
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = col;
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('⛺', camp.x, camp.y);
+    ctx.textBaseline = 'alphabetic';
+
+    // Кольцо прогресса спавна
+    if (camp.team !== -1) {
+      var frac = 1 - camp.spawnTimer / SPAWN_TIME;
+      ctx.beginPath();
+      ctx.arc(camp.x, camp.y, camp.radius + 5, -Math.PI/2, -Math.PI/2 + frac * Math.PI * 2);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  });
+
+  // Линии боя
+  units.forEach(u => {
+    if (!u.alive || !u.attacking || !u.attacking.alive) return;
+    ctx.strokeStyle = 'rgba(255,200,0,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(u.x, u.y); ctx.lineTo(u.attacking.x, u.attacking.y);
+    ctx.stroke();
+  });
+
+  // Юниты
+  units.forEach(u => {
+    if (!u.alive) return;
+    var sx = Math.abs(u.shakeX) > 0.3 ? u.shakeX : 0;
+    var sy = Math.abs(u.shakeY) > 0.3 ? u.shakeY : 0;
+    var rx = u.x + sx, ry = u.y + sy;
+    var col  = TEAM_COLOR[u.team] || '#aaa';
+    var dark = TEAM_DARK[u.team]  || '#555';
+    // Анимация смены цвета через белый (перерождение)
+    if (u.colorTimer > 0 && u.colorFrom >= 0 && u.colorDuration > 0) {
+      var t = 1 - u.colorTimer / u.colorDuration;
+      var fromCol  = TEAM_COLOR[u.colorFrom] || '#aaa';
+      var fromDark = TEAM_DARK[u.colorFrom]  || '#555';
+      var toCol  = TEAM_COLOR[u.team] || '#aaa';
+      var toDark = TEAM_DARK[u.team]  || '#555';
+      if (t < 0.5) {
+        col  = lerpColor(fromCol,  '#ffffff', t * 2);
+        dark = lerpColor(fromDark, '#cccccc', t * 2);
+      } else {
+        col  = lerpColor('#ffffff', toCol,  (t - 0.5) * 2);
+        dark = lerpColor('#cccccc', toDark, (t - 0.5) * 2);
+      }
+    }
+    // Wavering: пульс между серым и цветом команды
+    var drawCol = col;
+    if (u.wavering) {
+      var wPulse = 0.45 + 0.45 * Math.sin(gameTime * 8); // 0..0.9, быстрый пульс
+      drawCol = lerpColor('#aaaaaa', col, wPulse);
+    }
+    var fc = u.flashTimer > 0 ? '#ffffff' : drawCol;
+
+    // Кольцо-вспышка при росте резервиста
+    if (u.growTimer > 0 && u.growDuration > 0) {
+      var gp = 1 - u.growTimer / u.growDuration; // 0→1
+      // Кольцо расширяется в первые 40% анимации (фаза нарастания)
+      if (gp < 0.40) {
+        var burst = gp / 0.40;
+        var ringR = u.radius + 3 + burst * 10;
+        var ringA = (1 - burst) * 0.7;
+        ctx.beginPath();
+        ctx.arc(rx, ry, ringR, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,200,' + ringA.toFixed(2) + ')';
+        ctx.lineWidth = 2 * (1 - burst) + 0.5;
+        ctx.stroke();
+      }
+      // Нежное свечение в течение всей анимации
+      var glowA = Math.max(0, 0.35 * (1 - (1 - u.growTimer / u.growDuration)));
+      if (glowA > 0.02) {
+        ctx.beginPath();
+        ctx.arc(rx, ry, u.radius + 3, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,180,' + glowA.toFixed(2) + ')';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    ctx.beginPath();
+    ctx.arc(rx, ry, u.radius, 0, Math.PI * 2);
+    ctx.fillStyle = fc;
+    ctx.fill();
+    ctx.strokeStyle = dark;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // HP bar
+    var bw = u.radius * 2, bh = 3;
+    var bx = rx - u.radius, by = ry - u.radius - 7;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(bx, by, bw, bh);
+    var hpR = u.hp / u.maxHp;
+    ctx.fillStyle = hpR > 0.5 ? '#44ff88' : hpR > 0.25 ? '#ffcc00' : '#ff4444';
+    ctx.fillRect(bx, by, bw * hpR, bh);
+
+    // Wavering: дуга-таймер вокруг юнита (убывает до нуля)
+    if (u.wavering) {
+      var wFrac = Math.max(0, u.waveringTimer / 2.0); // 1→0
+      var wAng = -Math.PI / 2; // старт сверху
+      ctx.beginPath();
+      ctx.arc(rx, ry, u.radius + 6, wAng, wAng + Math.PI * 2 * wFrac);
+      ctx.strokeStyle = 'rgba(180,180,220,0.85)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Courage: зелёная дуга (накапливается)
+      if (u.waveringCourage > 0) {
+        ctx.beginPath();
+        ctx.arc(rx, ry, u.radius + 9, wAng, wAng + Math.PI * 2 * u.waveringCourage);
+        ctx.strokeStyle = 'rgba(80,220,120,0.85)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+    // Ужас / страх — кольцо снаружи
+    if (u.fearBurst) {
+      var pulse = 0.5 + 0.5 * Math.sin(gameTime * 10);
+      ctx.beginPath();
+      ctx.arc(rx, ry, u.radius + 7, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,50,50,' + (0.5 + 0.4 * pulse) + ')';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    } else if (u.fearStack >= 2) {
+      ctx.beginPath();
+      ctx.arc(rx, ry, u.radius + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,180,0,0.45)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // Щит при блоке
+    if (u.blockTimer > 0) {
+      var alpha = u.blockTimer / 0.35;
+      ctx.beginPath();
+      ctx.arc(rx, ry, u.radius + 5, -Math.PI * 0.75, Math.PI * 0.75);
+      ctx.strokeStyle = 'rgba(100,200,255,' + (alpha * 0.95) + ')';
+      ctx.lineWidth = 3 * alpha;
+      ctx.stroke();
+    }
+
+    // Вращающиеся звёзды при оглушении
+    if (u.stunTimer > 0) {
+      for (var si = 0; si < 3; si++) {
+        var ang = gameTime * 4 + si * Math.PI * 2 / 3;
+        var sx2 = rx + Math.cos(ang) * (u.radius + 7);
+        var sy2 = ry + Math.sin(ang) * (u.radius + 7);
+        ctx.fillStyle = '#ffee00';
+        ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('★', sx2, sy2 + 3);
+      }
+    } else if (u.retreating) {
+      ctx.fillStyle = u.retreatBlocked ? '#ff4444cc' : '#ffffff88';
+      ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(u.retreatBlocked ? '✖↩' : '↩', rx, ry + 4);
+    }
+
+    if (isSplit && u.team === 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(u.group === 0 ? 'A' : 'B', rx, ry - u.radius - 10);
+    }
+  });
+
+  // Конец мирового пространства — возврат к экранным координатам
+  ctx.restore();
+
+  // HUD
+  var t0 = units.filter(u => u.alive && u.team === 0).length;
+  var t1 = units.filter(u => u.alive && u.team === 1).length;
+  var c0 = camps.filter(c => c.team === 0).length;
+  var c1 = camps.filter(c => c.team === 1).length;
+  var total = camps.length;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, W, 30);
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'left';  ctx.fillStyle = TEAM_COLOR[0]; ctx.fillText('◉ ' + t0 + '  ⛺' + c0 + '/' + total, 10, 20);
+  ctx.textAlign = 'right'; ctx.fillStyle = TEAM_COLOR[1]; ctx.fillText('⛺' + c1 + '/' + total + '  ' + t1 + ' ◉', W - 10, 20);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#888'; ctx.fillText('VS', W/2, 20);
+
+
+  if (isSplit) {
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('A  ·  B', W/2, 46);
+  }
+
+  // Подсказка управления — первые 6 секунд
+  if (gameTime < 6) {
+    var hint = '1 палец — двигать  ·  2 пальца — разделить  ·  3 пальца — камера';
+    var alpha = gameTime < 5 ? 0.75 : 0.75 * (1 - (gameTime - 5));
+    ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(2) + ')';
+    ctx.fillText(hint, W/2, H - 14);
+  }
+
+  // Конец игры
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    ctx.fillRect(0, H/2 - 60, W, 120);
+    ctx.font = 'bold 26px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = gameOver === 'blue' ? TEAM_COLOR[0] : TEAM_COLOR[1];
+    ctx.fillText(gameOver === 'blue' ? '🔵 Победа!' : '🔴 Победа!', W/2, H/2 - 8);
+    ctx.font = '13px monospace';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('Нажми чтобы заново', W/2, H/2 + 24);
+  }
+}
+
+// ── Loop ───────────────────────────────────────────────────
+function updateCamera(dt) {
+  // Следим за активными синими (не отступающими), иначе за всеми
+  var blues = units.filter(function(u){ return u.alive && u.team === 0 && !u.retreating; });
+  if (blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0; });
+  if (blues.length > 0) {
+    var cx = blues.reduce(function(s,u){return s+u.x;},0) / blues.length;
+    var cy = blues.reduce(function(s,u){return s+u.y;},0) / blues.length;
+    camTargetX = cx - W / 2;
+    camTargetY = cy - H / 2;
+  }
+  camTargetX = Math.max(0, Math.min(MAP_W - W, camTargetX));
+  camTargetY = Math.max(0, Math.min(MAP_H - H, camTargetY));
+  // Плавное следование
+  camX += (camTargetX - camX) * Math.min(1, dt * 7);
+  camY += (camTargetY - camY) * Math.min(1, dt * 7);
+}
+
+var last = 0, gameTime = 0;
+function loop(ts) {
+  var dt = Math.min((ts - last) / 1000, 0.05);
+  last = ts;
+  gameTime += dt;
+  if (!gameOver) {
+    updateMovement(dt);
+    updateCombat(dt);
+    updateCamps(dt);
+    checkVictory();
+    updateCamera(dt);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(function(ts) { last = ts; requestAnimationFrame(loop); });
+
+} // end initGame
+}); // end window load
+</script>
+</body>
+</html>
