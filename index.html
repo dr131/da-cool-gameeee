@@ -9,6 +9,7 @@
 <meta name="theme-color" content="#1a1a2e">
 <link rel="manifest" href="manifest.json">
 <title>Tactics</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.4.2/pixi.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
@@ -18,7 +19,7 @@
 </head>
 <body>
 <div id="dbg" style="display:none;position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:12px;font-size:13px;z-index:9999;word-break:break-all"></div>
-<canvas id="c"></canvas>
+<div id="game-container"></div>
 <div id="splash" style="position:fixed;inset:0;background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;cursor:pointer;">
   <div style="font-size:48px;margin-bottom:16px;">⚔️</div>
   <div style="color:#fff;font-size:28px;font-family:monospace;font-weight:bold;letter-spacing:2px;">TACTICS</div>
@@ -47,21 +48,83 @@ function initGame() {
 var splash = document.getElementById('splash');
 if (splash) splash.style.display = 'none';
 
-var canvas = document.getElementById('c');
-var ctx = canvas.getContext('2d');
-
-// screen.width — CSS-пиксели, самое надёжное на iOS
+// ── Pixi Application ───────────────────────────────────────
 var rawW = Math.min(screen.width  || window.innerWidth  || 375, 800);
 var rawH = Math.min(screen.height || window.innerHeight || 600, 700);
 if (rawW < 50) rawW = 375;
 if (rawH < 50) rawH = 600;
 
-canvas.width  = rawW;
-canvas.height = rawH;
-canvas.style.width  = rawW + 'px';
-canvas.style.height = rawH + 'px';
+var app = new PIXI.Application({
+  width: rawW, height: rawH,
+  backgroundColor: 0x1a1a2e,
+  antialias: true,
+  resolution: 1,
+  autoDensity: false,
+});
+var container = document.getElementById('game-container');
+container.appendChild(app.view);
+app.view.style.touchAction = 'none';
 
-var W = canvas.width, H = canvas.height;
+var canvas = app.view; // совместимость с event listeners ниже
+var W = rawW, H = rawH;
+
+// Вспомогательная функция: hex строка '#rrggbb' → число для Pixi
+function c2n(hex) {
+  if (typeof hex === 'number') return hex;
+  return parseInt((hex || '#888888').replace('#', ''), 16);
+}
+
+// ── Pixi слои ──────────────────────────────────────────────
+var worldContainer = new PIXI.Container(); // весь мир (масштаб + камера)
+var hudContainer   = new PIXI.Container(); // HUD поверх (без масштаба)
+app.stage.addChild(worldContainer);
+app.stage.addChild(hudContainer);
+
+var bgGfx    = new PIXI.Graphics(); // фон — статичный, рисуется один раз
+var worldGfx = new PIXI.Graphics(); // динамика мира — очищается каждый кадр
+worldContainer.addChild(bgGfx);
+worldContainer.addChild(worldGfx);
+
+var hudGfx = new PIXI.Graphics();   // линии/прямоугольники HUD
+hudContainer.addChild(hudGfx);
+
+// HUD текст — создаём один раз, обновляем каждый кадр
+var txtStyle = { fontFamily: 'monospace', fontSize: 13, fill: 0x4488ff };
+var hudTxtBlue  = new PIXI.Text('', Object.assign({}, txtStyle, { fill: 0x4488ff }));
+var hudTxtRed   = new PIXI.Text('', Object.assign({}, txtStyle, { fill: 0xff4444 }));
+var hudTxtVs    = new PIXI.Text('VS', Object.assign({}, txtStyle, { fill: 0x888888 }));
+var hudTxtHint  = new PIXI.Text('', Object.assign({}, txtStyle, { fontSize: 11, fill: 0xffffff }));
+var hudTxtOver1 = new PIXI.Text('', Object.assign({}, txtStyle, { fontSize: 26, fontWeight: 'bold', fill: 0x4488ff }));
+var hudTxtOver2 = new PIXI.Text('Нажми чтобы заново', Object.assign({}, txtStyle, { fontSize: 13, fill: 0xaaaaaa }));
+hudTxtOver1.anchor.set(0.5);
+hudTxtOver2.anchor.set(0.5);
+hudTxtVs.anchor.set(0.5);
+hudTxtHint.anchor.set(0.5);
+hudContainer.addChild(hudGfx);
+hudContainer.addChild(hudTxtBlue);
+hudContainer.addChild(hudTxtRed);
+hudContainer.addChild(hudTxtVs);
+hudContainer.addChild(hudTxtHint);
+hudContainer.addChild(hudTxtOver1);
+hudContainer.addChild(hudTxtOver2);
+
+// Текстовый пул для меток юнитов в мировом пространстве
+var _txtPool = [], _txtPoolIdx = 0;
+function _getWorldText() {
+  if (_txtPoolIdx < _txtPool.length) {
+    var t = _txtPool[_txtPoolIdx++]; t.visible = true; return t;
+  }
+  var t = new PIXI.Text('', { fontFamily: 'sans-serif', fontSize: 11, fill: 0xffffff });
+  t.anchor.set(0.5, 0.5);
+  worldContainer.addChild(t);
+  _txtPool.push(t); _txtPoolIdx++;
+  return t;
+}
+function _resetWorldText() {
+  _txtPoolIdx = 0;
+  for (var _i = 0; _i < _txtPool.length; _i++) _txtPool[_i].visible = false;
+}
+
 // Мировые координаты — карта больше экрана
 var MAP_W = 1600, MAP_H = 1200;
 
@@ -992,279 +1055,261 @@ function resetGame() {
   initUnits();
 }
 
-// ── Prerender background ────────────────────────────────────
-var bgCanvas = document.createElement('canvas');
-bgCanvas.width = MAP_W; bgCanvas.height = MAP_H;
-var bgCtx = bgCanvas.getContext('2d');
-bgCtx.fillStyle = '#1a1a2e';
-bgCtx.fillRect(0, 0, MAP_W, MAP_H);
-bgCtx.strokeStyle = 'rgba(255,255,255,0.03)';
-bgCtx.lineWidth = 1;
-var _gs = 120;
-for (var _gx = 0; _gx < MAP_W; _gx += _gs) {
-  bgCtx.beginPath(); bgCtx.moveTo(_gx, 0); bgCtx.lineTo(_gx, MAP_H); bgCtx.stroke();
-}
-for (var _gy = 0; _gy < MAP_H; _gy += _gs) {
-  bgCtx.beginPath(); bgCtx.moveTo(0, _gy); bgCtx.lineTo(MAP_W, _gy); bgCtx.stroke();
-}
+// ── Prerender background (Pixi Graphics, рисуем один раз) ─
+(function() {
+  bgGfx.beginFill(0x1a1a2e);
+  bgGfx.drawRect(0, 0, MAP_W, MAP_H);
+  bgGfx.endFill();
+  bgGfx.lineStyle(1, 0xffffff, 0.03);
+  var _gs = 120;
+  for (var _gx = 0; _gx <= MAP_W; _gx += _gs) {
+    bgGfx.moveTo(_gx, 0); bgGfx.lineTo(_gx, MAP_H);
+  }
+  for (var _gy = 0; _gy <= MAP_H; _gy += _gs) {
+    bgGfx.moveTo(0, _gy); bgGfx.lineTo(MAP_W, _gy);
+  }
+})();
 
-// ── Draw ───────────────────────────────────────────────────
+// ── Draw (Pixi) ────────────────────────────────────────────
 function draw() {
-  var _cx = Math.round(camX), _cy2 = Math.round(camY);
-  var vW = W / ZOOM, vH = H / ZOOM; // размер видимой области в мировых координатах
+  var g = worldGfx;
+  g.clear();
+  _resetWorldText();
 
-  // Рисуем нужный кусок предрендеренного фона
-  ctx.drawImage(bgCanvas, _cx, _cy2, vW, vH, 0, 0, W, H);
-
-  // Применяем камеру + зум
-  ctx.save();
-  ctx.scale(ZOOM, ZOOM);
-  ctx.translate(-_cx, -_cy2);
+  // Камера → worldContainer transform
+  worldContainer.x = -camX * ZOOM;
+  worldContainer.y = -camY * ZOOM;
+  worldContainer.scale.set(ZOOM);
 
   // Центральная линия мира
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([6, 8]);
-  ctx.beginPath(); ctx.moveTo(MAP_W/2, 0); ctx.lineTo(MAP_W/2, MAP_H); ctx.stroke();
-  ctx.setLineDash([]);
+  g.lineStyle(1, 0xffffff, 0.06);
+  g.moveTo(MAP_W/2, 0); g.lineTo(MAP_W/2, MAP_H);
 
   // Лагеря
-  camps.forEach(camp => {
-    var col = camp.team === -1 ? '#888866' :
-                camp.team === 0  ? TEAM_COLOR[0] : TEAM_COLOR[1];
-    ctx.beginPath();
-    ctx.arc(camp.x, camp.y, camp.radius, 0, Math.PI * 2);
-    ctx.fillStyle = col + '33';
-    ctx.fill();
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+  camps.forEach(function(camp) {
+    var cn = camp.team === -1 ? 0x888866 :
+             camp.team === 0  ? c2n(TEAM_COLOR[0]) : c2n(TEAM_COLOR[1]);
+    var cns = camp.team === -1 ? '#888866' :
+              camp.team === 0  ? TEAM_COLOR[0] : TEAM_COLOR[1];
 
-    ctx.fillStyle = col;
-    ctx.font = '14px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('⛺', camp.x, camp.y);
-    ctx.textBaseline = 'alphabetic';
+    g.lineStyle(2, cn, 1);
+    g.beginFill(cn, 0.2);
+    g.drawCircle(camp.x, camp.y, camp.radius);
+    g.endFill();
+
+    // Иконка ⛺ через текстовый пул
+    var t = _getWorldText();
+    t.text = '⛺'; t.style.fontSize = 14;
+    t.position.set(camp.x, camp.y);
 
     // Кольцо прогресса спавна
     if (camp.team !== -1) {
       var frac = 1 - camp.spawnTimer / SPAWN_TIME;
-      ctx.beginPath();
-      ctx.arc(camp.x, camp.y, camp.radius + 5, -Math.PI/2, -Math.PI/2 + frac * Math.PI * 2);
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 3;
-      ctx.stroke();
+      if (frac > 0) {
+        // Pixi v7: рисуем дугу через arc
+        g.lineStyle(3, cn, 1);
+        g.arc(camp.x, camp.y, camp.radius + 5, -Math.PI/2, -Math.PI/2 + frac * Math.PI * 2);
+      }
     }
   });
 
   // Линии боя
-  units.forEach(u => {
+  units.forEach(function(u) {
     if (!u.alive || !u.attacking || !u.attacking.alive) return;
-    ctx.strokeStyle = 'rgba(255,200,0,0.18)';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(u.x, u.y); ctx.lineTo(u.attacking.x, u.attacking.y);
-    ctx.stroke();
+    g.lineStyle(1, 0xffc800, 0.18);
+    g.moveTo(u.x, u.y); g.lineTo(u.attacking.x, u.attacking.y);
   });
 
   // Юниты
-  units.forEach(u => {
+  units.forEach(function(u) {
     if (!u.alive) return;
-    // Viewport culling — не рисуем что вне экрана
     var _pad = 30;
-    if (u.x < camX - _pad || u.x > camX + W/ZOOM + _pad || u.y < camY - _pad || u.y > camY + H/ZOOM + _pad) return;
+    if (u.x < camX - _pad || u.x > camX + W/ZOOM + _pad ||
+        u.y < camY - _pad || u.y > camY + H/ZOOM + _pad) return;
+
     var sx = Math.abs(u.shakeX) > 0.3 ? u.shakeX : 0;
     var sy = Math.abs(u.shakeY) > 0.3 ? u.shakeY : 0;
     var rx = u.x + sx, ry = u.y + sy;
-    var col  = TEAM_COLOR[u.team] || '#aaa';
-    var dark = TEAM_DARK[u.team]  || '#555';
+
+    var col  = TEAM_COLOR[u.team] || '#aaaaaa';
+    var dark = TEAM_DARK[u.team]  || '#555555';
+
     // Анимация смены цвета через белый (перерождение)
     if (u.colorTimer > 0 && u.colorFrom >= 0 && u.colorDuration > 0) {
-      var t = 1 - u.colorTimer / u.colorDuration;
+      var ct = 1 - u.colorTimer / u.colorDuration;
       var fromCol  = TEAM_COLOR[u.colorFrom] || '#aaa';
       var fromDark = TEAM_DARK[u.colorFrom]  || '#555';
       var toCol  = TEAM_COLOR[u.team] || '#aaa';
       var toDark = TEAM_DARK[u.team]  || '#555';
-      if (t < 0.5) {
-        col  = lerpColor(fromCol,  '#ffffff', t * 2);
-        dark = lerpColor(fromDark, '#cccccc', t * 2);
+      if (ct < 0.5) {
+        col  = lerpColor(fromCol,  '#ffffff', ct * 2);
+        dark = lerpColor(fromDark, '#cccccc', ct * 2);
       } else {
-        col  = lerpColor('#ffffff', toCol,  (t - 0.5) * 2);
-        dark = lerpColor('#cccccc', toDark, (t - 0.5) * 2);
+        col  = lerpColor('#ffffff', toCol,  (ct - 0.5) * 2);
+        dark = lerpColor('#cccccc', toDark, (ct - 0.5) * 2);
       }
     }
-    // Wavering: пульс между серым и цветом команды
+
     var drawCol = col;
     if (u.wavering) {
-      var wPulse = 0.45 + 0.45 * Math.sin(gameTime * 8); // 0..0.9, быстрый пульс
+      var wPulse = 0.45 + 0.45 * Math.sin(gameTime * 8);
       drawCol = lerpColor('#aaaaaa', col, wPulse);
     }
     var fc = u.flashTimer > 0 ? '#ffffff' : drawCol;
 
-    // Кольцо-вспышка при росте резервиста
+    // Кольцо-вспышка (grow)
     if (u.growTimer > 0 && u.growDuration > 0) {
-      var gp = 1 - u.growTimer / u.growDuration; // 0→1
-      // Кольцо расширяется в первые 40% анимации (фаза нарастания)
+      var gp = 1 - u.growTimer / u.growDuration;
       if (gp < 0.40) {
         var burst = gp / 0.40;
         var ringR = u.radius + 3 + burst * 10;
         var ringA = (1 - burst) * 0.7;
-        ctx.beginPath();
-        ctx.arc(rx, ry, ringR, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,200,' + ringA.toFixed(2) + ')';
-        ctx.lineWidth = 2 * (1 - burst) + 0.5;
-        ctx.stroke();
+        g.lineStyle(2 * (1 - burst) + 0.5, 0xffffc8, ringA);
+        g.drawCircle(rx, ry, ringR);
       }
-      // Нежное свечение в течение всей анимации
-      var glowA = Math.max(0, 0.35 * (1 - (1 - u.growTimer / u.growDuration)));
+      var glowA = Math.max(0, 0.35 * (u.growTimer / u.growDuration));
       if (glowA > 0.02) {
-        ctx.beginPath();
-        ctx.arc(rx, ry, u.radius + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,180,' + glowA.toFixed(2) + ')';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        g.lineStyle(2, 0xffffb4, glowA);
+        g.drawCircle(rx, ry, u.radius + 3);
       }
     }
 
-    ctx.beginPath();
-    ctx.arc(rx, ry, u.radius, 0, Math.PI * 2);
-    ctx.fillStyle = fc;
-    ctx.fill();
-    ctx.strokeStyle = dark;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Тело юнита
+    g.lineStyle(2, c2n(dark), 1);
+    g.beginFill(c2n(fc), 1);
+    g.drawCircle(rx, ry, u.radius);
+    g.endFill();
 
     // HP bar
     var bw = u.radius * 2, bh = 3;
     var bx = rx - u.radius, by = ry - u.radius - 7;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(bx, by, bw, bh);
+    g.lineStyle(0);
+    g.beginFill(0x000000, 0.5);
+    g.drawRect(bx, by, bw, bh);
+    g.endFill();
     var hpR = u.hp / u.maxHp;
-    ctx.fillStyle = hpR > 0.5 ? '#44ff88' : hpR > 0.25 ? '#ffcc00' : '#ff4444';
-    ctx.fillRect(bx, by, bw * hpR, bh);
+    var hpC = hpR > 0.5 ? 0x44ff88 : hpR > 0.25 ? 0xffcc00 : 0xff4444;
+    g.beginFill(hpC, 1);
+    g.drawRect(bx, by, bw * hpR, bh);
+    g.endFill();
 
-    // Wavering: дуга-таймер вокруг юнита (убывает до нуля)
+    // Wavering дуга
     if (u.wavering) {
-      var wFrac = Math.max(0, u.waveringTimer / 2.0); // 1→0
-      var wAng = -Math.PI / 2; // старт сверху
-      ctx.beginPath();
-      ctx.arc(rx, ry, u.radius + 6, wAng, wAng + Math.PI * 2 * wFrac);
-      ctx.strokeStyle = 'rgba(180,180,220,0.85)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Courage: зелёная дуга (накапливается)
+      var wFrac = Math.max(0, u.waveringTimer / 2.0);
+      var wAng = -Math.PI / 2;
+      g.lineStyle(2, 0xb4b4dc, 0.85);
+      g.arc(rx, ry, u.radius + 6, wAng, wAng + Math.PI * 2 * wFrac);
       if (u.waveringCourage > 0) {
-        ctx.beginPath();
-        ctx.arc(rx, ry, u.radius + 9, wAng, wAng + Math.PI * 2 * u.waveringCourage);
-        ctx.strokeStyle = 'rgba(80,220,120,0.85)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+        g.lineStyle(1.5, 0x50dc78, 0.85);
+        g.arc(rx, ry, u.radius + 9, wAng, wAng + Math.PI * 2 * u.waveringCourage);
       }
     }
-    // Ужас / страх — кольцо снаружи
+
+    // Fear ring
     if (u.fearBurst) {
       var pulse = 0.5 + 0.5 * Math.sin(gameTime * 10);
-      ctx.beginPath();
-      ctx.arc(rx, ry, u.radius + 7, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,50,50,' + (0.5 + 0.4 * pulse) + ')';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
+      g.lineStyle(2.5, 0xff3232, 0.5 + 0.4 * pulse);
+      g.drawCircle(rx, ry, u.radius + 7);
     } else if (u.fearStack >= 2) {
-      ctx.beginPath();
-      ctx.arc(rx, ry, u.radius + 5, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,180,0,0.45)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      g.lineStyle(1.5, 0xffb400, 0.45);
+      g.drawCircle(rx, ry, u.radius + 5);
     }
 
-    // Щит при блоке
+    // Block shield
     if (u.blockTimer > 0) {
-      var alpha = u.blockTimer / 0.35;
-      ctx.beginPath();
-      ctx.arc(rx, ry, u.radius + 5, -Math.PI * 0.75, Math.PI * 0.75);
-      ctx.strokeStyle = 'rgba(100,200,255,' + (alpha * 0.95) + ')';
-      ctx.lineWidth = 3 * alpha;
-      ctx.stroke();
+      var ba = u.blockTimer / 0.35;
+      g.lineStyle(3 * ba, 0x64c8ff, ba * 0.95);
+      g.arc(rx, ry, u.radius + 5, -Math.PI * 0.75, Math.PI * 0.75);
     }
 
-    // Вращающиеся звёзды при оглушении
+    // Stun stars / retreat arrow / split label
     if (u.stunTimer > 0) {
       for (var si = 0; si < 3; si++) {
         var ang = gameTime * 4 + si * Math.PI * 2 / 3;
         var sx2 = rx + Math.cos(ang) * (u.radius + 7);
         var sy2 = ry + Math.sin(ang) * (u.radius + 7);
-        ctx.fillStyle = '#ffee00';
-        ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('★', sx2, sy2 + 3);
+        var st = _getWorldText();
+        st.text = '★'; st.style.fontSize = 9; st.style.fill = 0xffee00;
+        st.position.set(sx2, sy2);
       }
     } else if (u.retreating) {
-      ctx.fillStyle = u.retreatBlocked ? '#ff4444cc' : '#ffffff88';
-      ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(u.retreatBlocked ? '✖↩' : '↩', rx, ry + 4);
+      var rt = _getWorldText();
+      rt.text = u.retreatBlocked ? '✖↩' : '↩';
+      rt.style.fontSize = 11;
+      rt.style.fill = u.retreatBlocked ? 0xff4444 : 0xffffff;
+      rt.alpha = u.retreatBlocked ? 0.8 : 0.53;
+      rt.position.set(rx, ry);
     }
 
     if (isSplit && u.team === 0) {
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      ctx.font = '9px monospace'; ctx.textAlign = 'center';
-      ctx.fillText(u.group === 0 ? 'A' : 'B', rx, ry - u.radius - 10);
+      var lt = _getWorldText();
+      lt.text = u.group === 0 ? 'A' : 'B';
+      lt.style.fontSize = 9;
+      lt.style.fill = 0xffffff; lt.alpha = 0.4;
+      lt.position.set(rx, ry - u.radius - 10);
     }
   });
 
-  // Конец мирового пространства — возврат к экранным координатам
-  ctx.restore();
+  // ── HUD ─────────────────────────────────────────────────
+  var hg = hudGfx;
+  hg.clear();
 
-  // HUD — используем кэшированные счётчики
   var t0 = teamAlive[0], t1 = teamAlive[1];
   var c0 = teamCamps[0], c1 = teamCamps[1];
   var total = camps.length;
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(0, 0, W, 34);
-  ctx.font = '13px monospace';
-  ctx.textAlign = 'left';  ctx.fillStyle = TEAM_COLOR[0]; ctx.fillText('◉ ' + t0 + '  ⛺' + c0 + '/' + total, 10, 18);
-  ctx.textAlign = 'right'; ctx.fillStyle = TEAM_COLOR[1]; ctx.fillText('⛺' + c1 + '/' + total + '  ' + t1 + ' ◉', W - 10, 18);
-  ctx.textAlign = 'center'; ctx.fillStyle = '#888'; ctx.fillText('VS', W/2, 18);
 
-  // Полоска стамины (среднее по синим)
+  // Панель сверху
+  hg.beginFill(0x000000, 0.6);
+  hg.drawRect(0, 0, W, 34);
+  hg.endFill();
+
+  hudTxtBlue.text = '◉ ' + t0 + '  ⛺' + c0 + '/' + total;
+  hudTxtBlue.position.set(10, 5);
+  hudTxtRed.text  = '⛺' + c1 + '/' + total + '  ' + t1 + ' ◉';
+  hudTxtRed.position.set(W - 10 - hudTxtRed.width, 5);
+  hudTxtVs.position.set(W/2, 5);
+
+  // Полоска стамины
   var blueUnits = units.filter(function(u){ return u.alive && u.team === 0; });
   if (blueUnits.length > 0) {
     var avgStam = blueUnits.reduce(function(s,u){ return s + (u.stamina||STAMINA_MAX); }, 0) / blueUnits.length;
     var stamRatio = avgStam / STAMINA_MAX;
     var barW = 80, barH = 4, barX = W/2 - barW/2, barY = 26;
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-    ctx.fillRect(barX, barY, barW, barH);
-    var stamColor = stamRatio > 0.5 ? '#44ddaa' : stamRatio > 0.25 ? '#ffcc00' : '#ff4444';
-    ctx.fillStyle = stamColor;
-    ctx.fillRect(barX, barY, barW * stamRatio, barH);
+    hg.beginFill(0xffffff, 0.15);
+    hg.drawRect(barX, barY, barW, barH);
+    hg.endFill();
+    var stamC = stamRatio > 0.5 ? 0x44ddaa : stamRatio > 0.25 ? 0xffcc00 : 0xff4444;
+    hg.beginFill(stamC, 1);
+    hg.drawRect(barX, barY, barW * stamRatio, barH);
+    hg.endFill();
   }
-
 
   if (isSplit) {
-    ctx.fillStyle = 'rgba(255,255,255,0.22)';
-    ctx.font = '11px monospace'; ctx.textAlign = 'center';
-    ctx.fillText('A  ·  B', W/2, 46);
-  }
-
-  // Подсказка управления — первые 6 секунд
-  if (gameTime < 6) {
+    hudTxtHint.text = 'A  ·  B';
+    hudTxtHint.style.fill = 0xffffff; hudTxtHint.alpha = 0.22;
+    hudTxtHint.position.set(W/2, 42);
+  } else if (gameTime < 6) {
     var hint = '1 палец — двигать  ·  2 пальца — разделить  ·  3 пальца — камера';
     var alpha = gameTime < 5 ? 0.75 : 0.75 * (1 - (gameTime - 5));
-    ctx.font = '11px monospace'; ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(2) + ')';
-    ctx.fillText(hint, W/2, H - 14);
+    hudTxtHint.text = hint;
+    hudTxtHint.style.fill = 0xffffff; hudTxtHint.alpha = alpha;
+    hudTxtHint.position.set(W/2, H - 14);
+  } else {
+    hudTxtHint.text = '';
   }
 
-
-  // Конец игры
+  // Game over overlay
   if (gameOver) {
-    ctx.fillStyle = 'rgba(0,0,0,0.72)';
-    ctx.fillRect(0, H/2 - 60, W, 120);
-    ctx.font = 'bold 26px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = gameOver === 'blue' ? TEAM_COLOR[0] : TEAM_COLOR[1];
-    ctx.fillText(gameOver === 'blue' ? '🔵 Победа!' : '🔴 Победа!', W/2, H/2 - 8);
-    ctx.font = '13px monospace';
-    ctx.fillStyle = '#aaa';
-    ctx.fillText('Нажми чтобы заново', W/2, H/2 + 24);
+    hg.beginFill(0x000000, 0.72);
+    hg.drawRect(0, H/2 - 60, W, 120);
+    hg.endFill();
+    hudTxtOver1.text = gameOver === 'blue' ? '🔵 Победа!' : '🔴 Победа!';
+    hudTxtOver1.style.fill = gameOver === 'blue' ? 0x4488ff : 0xff4444;
+    hudTxtOver1.position.set(W/2, H/2 - 8);
+    hudTxtOver2.position.set(W/2, H/2 + 24);
+    hudTxtOver1.visible = true; hudTxtOver2.visible = true;
+  } else {
+    hudTxtOver1.visible = false; hudTxtOver2.visible = false;
   }
 }
 
@@ -1431,10 +1476,9 @@ function updateAI(dt) {
   }
 }
 
-var last = 0, gameTime = 0;
-function loop(ts) {
-  var dt = Math.min((ts - last) / 1000, 0.05);
-  last = ts;
+var gameTime = 0;
+app.ticker.add(function(pixiDelta) {
+  var dt = Math.min(app.ticker.elapsedMS / 1000, 0.05);
   gameTime += dt;
   if (!gameOver) {
     buildGrid();
@@ -1447,9 +1491,7 @@ function loop(ts) {
     updateCamera(dt);
   }
   draw();
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(function(ts) { last = ts; requestAnimationFrame(loop); });
+});
 
 } // end initGame
 }); // end window load
