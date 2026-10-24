@@ -153,7 +153,7 @@ function makeUnit(x, y, team, group, isSmall) {
     shakeX: 0, shakeY: 0,
     stunTimer: 0,
     retreatBlocked: false,
-    campGuard: null, isNeutral: false, homecamp: null,
+    campGuard: null, isNeutral: false, homecamp: null, waiting: false,
     growTimer: 0, growFrom: 0, growDuration: 0,
     colorTimer: 0, colorFrom: -1, colorDuration: 0,
     blockTimer: 0, outnumberedRounds: 0,
@@ -206,6 +206,7 @@ function spawnCampUnit(camp) {
   var ny = camp.y + (Math.random() - 0.5) * 30;
   var g = makeUnit(nx, ny, camp.team, 0);
   g.homecamp = camp;
+  g.waiting = true;   // ждёт у лагеря, пока не подойдёт своя армия
   units.push(g);
   aliveCount++; teamAlive[camp.team]++;
   if (units.length > 500) units = units.filter(function(u) { return u.alive; });
@@ -660,6 +661,7 @@ function captureUnit(unit) {
   unit.group = 0;
   unit.hp = Math.ceil(unit.maxHp * 0.5);
   unit.retreating = false;
+  unit.waiting = false;
   unit.stunTimer = 0;
   unit.colorTimer = 5;
   unit.colorDuration = 5;
@@ -669,7 +671,19 @@ function captureUnit(unit) {
 function updateMovement(dt) {
 
   units.forEach(u => {
-    if (!u.alive || isFighting(u) || (u.campGuard && u.isNeutral)) return; // нейтралы стоят на месте
+    if (!u.alive || isFighting(u) || (u.campGuard && u.isNeutral)) return;
+
+    // Ожидает у лагеря: стоит пока не подойдёт союзник из армии
+    if (u.waiting) {
+      var joined = false;
+      forNearby(u.x, u.y, 80, function(other) {
+        if (!joined && other !== u && other.alive && other.team === u.team && !other.waiting && !other.isNeutral)
+          joined = true;
+      });
+      if (joined) u.waiting = false;
+      else return; // стоим на месте, combat всё равно сработает если враг подойдёт
+    }
+
     // Личное отступление: юнит бежит к своей базе, не тянет всю группу
     var tx, ty;
     if (u.retreating && u._retreatX !== undefined) {
