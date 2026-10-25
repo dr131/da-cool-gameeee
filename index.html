@@ -102,6 +102,8 @@ hudTxtOver1.anchor.set(0.5);
 hudTxtOver2.anchor.set(0.5);
 hudTxtVs.anchor.set(0.5);
 hudTxtHint.anchor.set(0.5);
+var hudTxtFps = new PIXI.Text('', Object.assign({}, txtStyle, { fontSize: 10, fill: 0x44ff88 }));
+hudTxtFps.anchor.set(1, 1);
 hudContainer.addChild(hudGfx);
 hudContainer.addChild(hudTxtBlue);
 hudContainer.addChild(hudTxtRed);
@@ -109,6 +111,7 @@ hudContainer.addChild(hudTxtVs);
 hudContainer.addChild(hudTxtHint);
 hudContainer.addChild(hudTxtOver1);
 hudContainer.addChild(hudTxtOver2);
+hudContainer.addChild(hudTxtFps);
 
 // Текстовый пул для меток юнитов в мировом пространстве
 var _txtPool = [], _txtPoolIdx = 0;
@@ -1300,6 +1303,10 @@ function draw() {
     hudTxtHint.text = '';
   }
 
+  // FPS счётчик
+  hudTxtFps.text = _fps + ' fps | u:' + aliveCount;
+  hudTxtFps.position.set(W - 4, H - 4);
+
   // Game over overlay
   if (gameOver) {
     hg.beginFill(0x000000, 0.72);
@@ -1479,20 +1486,32 @@ function updateAI(dt) {
 }
 
 var gameTime = 0;
+var _fpsFrames = 0, _fpsTime = 0, _fps = 0;
+var _dbgEl = document.getElementById('dbg');
+
 app.ticker.add(function(pixiDelta) {
   var dt = Math.min(app.ticker.elapsedMS / 1000, 0.05);
   gameTime += dt;
-  if (!gameOver) {
-    buildGrid();
-    updateMovement(dt);
-    buildGrid();
-    updateCombat(dt);
-    updateCamps(dt);
-    updateAI(dt);
-    checkVictory();
-    updateCamera(dt);
+
+  // FPS счётчик
+  _fpsFrames++;
+  _fpsTime += dt;
+  if (_fpsTime >= 1.0) {
+    _fps = Math.round(_fpsFrames / _fpsTime);
+    _fpsFrames = 0; _fpsTime = 0;
   }
-  draw();
+
+  if (!gameOver) {
+    try { buildGrid(); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='buildGrid: '+e.message; return; }
+    try { updateMovement(dt); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='updateMovement: '+e.message; return; }
+    try { buildGrid(); } catch(e) { return; }
+    try { updateCombat(dt); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='updateCombat: '+e.message; return; }
+    try { updateCamps(dt); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='updateCamps: '+e.message; return; }
+    try { updateAI(dt); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='updateAI: '+e.message; return; }
+    try { checkVictory(); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='checkVictory: '+e.message; return; }
+    try { updateCamera(dt); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='updateCamera: '+e.message; return; }
+  }
+  try { draw(); } catch(e) { _dbgEl.style.display='block'; _dbgEl.textContent='draw: '+e.message+' | '+e.stack.split('\n')[1]; return; }
 });
 
 } // end initGame
