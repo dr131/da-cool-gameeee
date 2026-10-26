@@ -1563,10 +1563,7 @@ function updateAI(dt) {
 
   // ── Приоритет 1: СБОР РЕЗЕРВА ─────────────────────────────
   // Если резервисты есть И (уступаем глобально ИЛИ встречаем большой отряд локально)
-  var wantRally = rallyTarget && (
-    ratio < 0.75 ||                      // общее численное меньшинство
-    (localRatio < 0.7 && localBlues > 2) // локально окружены
-  );
+  var wantRally = rallyTarget && ratio < 0.75;
   if (wantRally) {
     tx = rallyTarget.x; ty = rallyTarget.y;
     chosenMode = 'rally';
