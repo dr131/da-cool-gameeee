@@ -161,7 +161,7 @@ var CHARGE_DIST_T2 = 130; // тир 2 → +55% урон
 var CHARGE_DIST_T3 = 220; // тир 3 → +90% урон + stun 0.4с
 // Глобальный флаг заряда для team 0 (игрок)
 // палец на экране / кнопка зажата = заряд, убрал = марш
-var playerCharging = false;
+// playerCharging удалён — заменён на playerSprint[] (двойной тап)
 
 // team: 0=синий, 1=красный, 2=нейтрал
 var TEAM_COLOR = ['#4488ff', '#ff4444', '#aaaaaa'];
@@ -420,14 +420,72 @@ function setTarget(team, group, pos) {
 }
 
 // ── Input ──────────────────────────────────────────────────
-// Скролл камеры мышью (ПКМ или средняя кнопка)
+// playerSprint[group]: true = юниты группы бегут (спринт-режим)
+var playerSprint = [false, false];
+
+// Определяем какая группа ближе к точке касания (мировые координаты)
+function closestGroup(wx, wy) {
+  if (!isSplit) return 0;
+  var g0x=0,g0y=0,g0n=0, g1x=0,g1y=0,g1n=0;
+  for (var _gi=0; _gi<units.length; _gi++) {
+    var _gu = units[_gi];
+    if (!_gu.alive || _gu.team !== 0) continue;
+    if (_gu.group === 0) { g0x+=_gu.x; g0y+=_gu.y; g0n++; }
+    else                 { g1x+=_gu.x; g1y+=_gu.y; g1n++; }
+  }
+  if (!g0n) return 1;
+  if (!g1n) return 0;
+  var d0 = Math.hypot(wx - g0x/g0n, wy - g0y/g0n);
+  var d1 = Math.hypot(wx - g1x/g1n, wy - g1y/g1n);
+  return d0 <= d1 ? 0 : 1;
+}
+
+// Двойной тап
+var _lastTapMs = 0, _lastTapCX = 0, _lastTapCY = 0;
+var DOUBLE_TAP_MS  = 350;
+var DOUBLE_TAP_PX  = 50;
+
+function handleTap(clientX, clientY) {
+  var pos = getPos(clientX, clientY);
+  var grp = closestGroup(pos.x, pos.y);
+  var now = performance.now();
+  var dt2 = now - _lastTapMs;
+  var dist2 = Math.hypot(clientX - _lastTapCX, clientY - _lastTapCY);
+  if (dt2 < DOUBLE_TAP_MS && dist2 < DOUBLE_TAP_PX) {
+    // Двойной тап — переключить спринт для ближайшей группы
+    if (isSplit) {
+      playerSprint[grp] = !playerSprint[grp];
+    } else {
+      playerSprint[0] = !playerSprint[0];
+      playerSprint[1] = playerSprint[0];
+    }
+    _lastTapMs = 0; // сброс чтобы тройной не триггерил снова
+  } else {
+    // Одиночный тап — движение
+    if (isSplit) {
+      setTarget(0, grp, pos);
+    } else {
+      setTarget(0, 0, pos);
+      setTarget(0, 1, pos);
+    }
+    _lastTapMs = now; _lastTapCX = clientX; _lastTapCY = clientY;
+  }
+}
+
+// Мышь (десктоп): ЛКМ = двигать/тап, ПКМ/средняя = скролл
 var mouseScrolling = false, mouseScrollX = 0, mouseScrollY = 0;
-canvas.addEventListener('mousedown', e => {
+var mouseDragging = false, mouseDragStartX = 0, mouseDragStartY = 0;
+canvas.addEventListener('mousedown', function(e) {
   if (gameOver) { resetGame(); return; }
-  if (e.button === 0) { setTarget(0, 0, getPos(e.clientX, e.clientY)); playerCharging = true; }
-  if (e.button === 1 || e.button === 2) { mouseScrolling = true; mouseScrollX = e.clientX; mouseScrollY = e.clientY; }
+  if (e.button === 0) {
+    mouseDragging = false;
+    mouseDragStartX = e.clientX; mouseDragStartY = e.clientY;
+  }
+  if (e.button === 1 || e.button === 2) {
+    mouseScrolling = true; mouseScrollX = e.clientX; mouseScrollY = e.clientY;
+  }
 });
-canvas.addEventListener('mousemove', e => {
+canvas.addEventListener('mousemove', function(e) {
   if (gameOver) return;
   if (mouseScrolling) {
     camX = Math.max(0, Math.min(MAP_W - W/ZOOM, camX - (e.clientX - mouseScrollX)/ZOOM));
@@ -436,72 +494,86 @@ canvas.addEventListener('mousemove', e => {
     mouseScrollX = e.clientX; mouseScrollY = e.clientY;
     return;
   }
-  if (e.buttons === 1) setTarget(0, 0, getPos(e.clientX, e.clientY));
+  if (e.buttons === 1) {
+    var d = Math.hypot(e.clientX - mouseDragStartX, e.clientY - mouseDragStartY);
+    if (d > 8) {
+      mouseDragging = true;
+      var pos = getPos(e.clientX, e.clientY);
+      var grp = closestGroup(pos.x, pos.y);
+      if (isSplit) { setTarget(0, grp, pos); }
+      else         { setTarget(0, 0, pos); setTarget(0, 1, pos); }
+    }
+  }
 });
-canvas.addEventListener('mouseup', () => { mouseScrolling = false; playerCharging = false; });
-canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('mouseup', function(e) {
+  mouseScrolling = false;
+  if (e.button === 0 && !mouseDragging) {
+    handleTap(e.clientX, e.clientY);
+  }
+  mouseDragging = false;
+});
+canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
-// Блокируем системный скролл iOS — только после load
+// Блокируем системный скролл iOS
 document.body.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
 
-// Тач: 1 палец = команда (hold=заряд), 3 пальца = скролл, 2 пальца = разделить армию
-var touchStartX = 0, touchStartY = 0, touchMoved = false, touchScrolling = false;
+// Тач: 1 палец = тап/тянуть, 2 пальца = сплит/мерж
+var touchStartX = 0, touchStartY = 0, touchMoved = false;
 var lastTouchX = 0, lastTouchY = 0;
-var touchStartTime = 0;
-canvas.addEventListener('touchstart', e => {
+var touchActiveGroup = 0; // группа выбранная в начале касания
+
+canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   if (gameOver) { resetGame(); return; }
   if (e.touches.length === 1) {
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
     lastTouchX = touchStartX; lastTouchY = touchStartY;
-    touchMoved = false; touchScrolling = false;
-    playerCharging = true; // держим палец = разгон
-    if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
+    touchMoved = false;
+    var pos = getPos(touchStartX, touchStartY);
+    touchActiveGroup = closestGroup(pos.x, pos.y);
   } else if (e.touches.length === 2) {
-    touchScrolling = false;
-    if (!isSplit) splitArmy();
-    setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
-    setTarget(0, 1, getPos(e.touches[1].clientX, e.touches[1].clientY));
-  } else if (e.touches.length === 3) {
-    // 3 пальца = скролл камеры
-    touchScrolling = true;
-    lastTouchX = e.touches[0].clientX;
-    lastTouchY = e.touches[0].clientY;
+    // 2 пальца = переключить сплит
+    if (isSplit) {
+      // мерж
+      isSplit = false;
+      playerSprint[0] = playerSprint[0] || playerSprint[1];
+      playerSprint[1] = playerSprint[0];
+      units.forEach(function(u) { if (u.team === 0) u.group = 0; });
+    } else {
+      splitArmy();
+      // направляем каждую группу к своему пальцу
+      var pos0 = getPos(e.touches[0].clientX, e.touches[0].clientY);
+      var pos1 = getPos(e.touches[1].clientX, e.touches[1].clientY);
+      setTarget(0, 0, pos0); setTarget(0, 1, pos1);
+    }
   }
 }, { passive: false });
-canvas.addEventListener('touchmove', e => {
+
+canvas.addEventListener('touchmove', function(e) {
   e.preventDefault();
   if (gameOver) return;
-  if (e.touches.length === 3 || touchScrolling) {
-    var dx = e.touches[0].clientX - lastTouchX;
-    var dy = e.touches[0].clientY - lastTouchY;
-    camX = Math.max(0, Math.min(MAP_W - W/ZOOM, camX - dx/ZOOM));
-    camY = Math.max(0, Math.min(MAP_H - H/ZOOM, camY - dy/ZOOM));
-    camTargetX = camX; camTargetY = camY;
-    lastTouchX = e.touches[0].clientX;
-    lastTouchY = e.touches[0].clientY;
-    return;
-  }
   if (e.touches.length === 1) {
     var d = Math.hypot(e.touches[0].clientX - touchStartX, e.touches[0].clientY - touchStartY);
-    if (d > 8) touchMoved = true;
-    if (touchMoved) setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
+    if (d > 8) {
+      touchMoved = true;
+      var pos = getPos(e.touches[0].clientX, e.touches[0].clientY);
+      if (isSplit) { setTarget(0, touchActiveGroup, pos); }
+      else         { setTarget(0, 0, pos); setTarget(0, 1, pos); }
+    }
     lastTouchX = e.touches[0].clientX; lastTouchY = e.touches[0].clientY;
-  } else if (e.touches.length === 2) {
+  } else if (e.touches.length === 2 && isSplit) {
+    // Пока 2 пальца на экране после сплита — двигаем группы к пальцам
     setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
     setTarget(0, 1, getPos(e.touches[1].clientX, e.touches[1].clientY));
   }
 }, { passive: false });
-canvas.addEventListener('touchend', e => {
-  if (e.touches.length === 0) {
-    if (!touchMoved && !touchScrolling) {
-      setTarget(0, 0, getPos(lastTouchX, lastTouchY));
-    }
-    if (isSplit) { isSplit = false; units.forEach(u => { if (u.team === 0) u.group = 0; }); }
-    touchScrolling = false;
-    playerCharging = false;
+
+canvas.addEventListener('touchend', function(e) {
+  if (e.touches.length === 0 && !touchMoved) {
+    handleTap(lastTouchX, lastTouchY);
   }
+  if (e.touches.length === 0) touchMoved = false;
 });
 
 function getPos(clientX, clientY) {
@@ -807,26 +879,29 @@ function updateMovement(dt) {
     var dx = tx - u.x, dy = ty - u.y;
     var dist = Math.hypot(dx, dy);
 
-    // ── Стамина и разгон ──────────────────────────────────────
-    var isCharging = (u.team === 0) ? playerCharging : false; // AI не использует заряд
-    if (isCharging && u.stamina > 0 && !u.attacking) {
-      // Разгон: holdTime нарастает пока палец на экране
+    // ── Стамина и спринт ──────────────────────────────────────
+    // playerSprint[group] — переключатель (двойной тап), AI не спринтует
+    var isSprinting = (u.team === 0) ? playerSprint[u.group] : false;
+    if (isSprinting && u.stamina > 0 && !u.attacking) {
+      // Спринт: holdTime нарастает пока активен режим
       u.holdTime = Math.min((u.holdTime || 0) + dt, 1.5);
       u.stamina = Math.max(0, u.stamina - STAMINA_DRAIN * dt);
+      // Автоматически снять спринт при истощении стамины
+      if (u.stamina <= 0) playerSprint[u.group] = false;
     } else {
-      u.holdTime = Math.max((u.holdTime || 0) - dt * 2, 0); // замедляемся вдвое быстрее
-      if (!isCharging || u.stamina <= 0) {
+      u.holdTime = Math.max((u.holdTime || 0) - dt * 2, 0); // торможение вдвое быстрее
+      if (!isSprinting || u.stamina <= 0) {
         u.stamina = Math.min(STAMINA_MAX, u.stamina + STAMINA_REGEN * dt);
       }
     }
     // chargeRatio: 0=марш, 1=полный разгон
     var chargeRatio = (u.holdTime || 0) / 1.5;
     var maxSpd = SPEED + (CHARGE_SPEED - SPEED) * chargeRatio;
-    // Накапливаем дистанцию разгона (только пока разгоняемся и движемся)
+    // Накапливаем дистанцию разгона
     if (chargeRatio > 0.1 && dist > 10 && !u.attacking) {
       u.chargeDist = (u.chargeDist || 0) + maxSpd;
-    } else if (!isCharging || u.attacking) {
-      u.chargeDist = 0; // сбросить после удара или остановки
+    } else if (!isSprinting || u.attacking) {
+      u.chargeDist = 0;
     }
 
     if (dist > 4) {
@@ -1050,6 +1125,7 @@ function checkVictory() {
 
 function resetGame() {
   gameOver = null; isSplit = false;
+  playerSprint[0] = false; playerSprint[1] = false;
   targets[0][0] = targets[0][1] = { x: 80,        y: MAP_H/2 };
   targets[1][0] = targets[1][1] = { x: MAP_W-80,  y: MAP_H/2 };
   groupRetreating[0][0] = groupRetreating[0][1] = false;
@@ -1289,12 +1365,19 @@ function draw() {
     hg.endFill();
   }
 
+  // Индикатор спринта ⚡ и метки групп при сплите
   if (isSplit) {
-    hudTxtHint.text = 'A  ·  B';
-    hudTxtHint.style.fill = 0xffffff; hudTxtHint.alpha = 0.22;
+    var spA = playerSprint[0], spB = playerSprint[1];
+    hudTxtHint.text = (spA ? '⚡A' : 'A') + '  ·  ' + (spB ? 'B⚡' : 'B');
+    hudTxtHint.style.fill = (spA || spB) ? 0xffee44 : 0xffffff;
+    hudTxtHint.alpha = 0.6;
+    hudTxtHint.position.set(W/2, 42);
+  } else if (playerSprint[0]) {
+    hudTxtHint.text = '⚡ СПРИНТ';
+    hudTxtHint.style.fill = 0xffee44; hudTxtHint.alpha = 0.85;
     hudTxtHint.position.set(W/2, 42);
   } else if (gameTime < 6) {
-    var hint = '1 палец — двигать  ·  2 пальца — разделить  ·  3 пальца — камера';
+    var hint = '1 палец — двигать  ·  2 пальца — разделить  ·  2× тап — спринт ⚡';
     var alpha = gameTime < 5 ? 0.75 : 0.75 * (1 - (gameTime - 5));
     hudTxtHint.text = hint;
     hudTxtHint.style.fill = 0xffffff; hudTxtHint.alpha = alpha;
