@@ -1104,8 +1104,13 @@ function checkVictory() {
   if (gameOver) return;
   var total = camps.length;
 
-  // Смерть всех активных юнитов синих — ищем лагерь с резервистами
-  if (teamAlive[0] === 0) {
+  // Смерть всех активных (не-waiting) юнитов синих — ищем лагерь с резервистами
+  var activeBlue = 0;
+  for (var _ab = 0; _ab < units.length; _ab++) {
+    var _abu = units[_ab];
+    if (_abu.alive && _abu.team === 0 && !_abu.waiting && !_abu.isNeutral) activeBlue++;
+  }
+  if (activeBlue === 0) {
     // Есть ли синие лагеря с ждущими резервистами?
     var reserveCamps = [];
     for (var _vc = 0; _vc < camps.length; _vc++) {
