@@ -471,13 +471,15 @@ function handleTap(clientX, clientY) {
     }
     _lastTapMs = 0; // сброс чтобы тройной не триггерил снова
   } else {
-    // Одиночный тап — движение
+    // Одиночный тап — мерж (если были сплит) + двигать к точке
     if (isSplit) {
-      setTarget(0, grp, pos);
-    } else {
-      setTarget(0, 0, pos);
-      setTarget(0, 1, pos);
+      isSplit = false;
+      playerSprint[0] = playerSprint[0] || playerSprint[1];
+      playerSprint[1] = playerSprint[0];
+      units.forEach(function(u) { if (u.team === 0) u.group = 0; });
     }
+    setTarget(0, 0, pos);
+    setTarget(0, 1, pos);
     _lastTapMs = now; _lastTapCX = clientX; _lastTapCY = clientY;
   }
 }
@@ -580,10 +582,20 @@ canvas.addEventListener('touchmove', function(e) {
 }, { passive: false });
 
 canvas.addEventListener('touchend', function(e) {
-  if (e.touches.length === 0 && !touchMoved) {
-    handleTap(lastTouchX, lastTouchY);
+  // Когда поднимаем палец — сбрасываем touchMoved чтобы переход
+  // 2→1 палец не помечался как "drag"
+  if (e.touches.length === 1) {
+    touchMoved = false;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    lastTouchX = touchStartX; lastTouchY = touchStartY;
+    var pos = getPos(touchStartX, touchStartY);
+    touchActiveGroup = closestGroup(pos.x, pos.y);
   }
-  if (e.touches.length === 0) touchMoved = false;
+  if (e.touches.length === 0) {
+    if (!touchMoved) handleTap(lastTouchX, lastTouchY);
+    touchMoved = false;
+  }
 });
 
 function getPos(clientX, clientY) {
@@ -1110,11 +1122,15 @@ function checkVictory() {
       // Выбираем случайный лагерь с резервом — игрок теперь командует ими
       var newCamp = reserveCamps[Math.floor(Math.random() * reserveCamps.length)];
       playerRespawnCamp = newCamp;
-      // Активируем резервистов (снимаем waiting)
+      // Сбрасываем сплит — один отряд под одним пальцем
+      isSplit = false;
+      playerSprint[0] = false; playerSprint[1] = false;
+      // Активируем резервистов: снимаем waiting, переводим в группу 0
       for (var _wu = 0; _wu < units.length; _wu++) {
         var _w = units[_wu];
         if (_w.alive && _w.team === 0 && _w.waiting && _w.homecamp === newCamp) {
           _w.waiting = false;
+          _w.group = 0;
         }
       }
       // Переносим цель к лагерю
