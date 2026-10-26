@@ -1150,7 +1150,52 @@ function checkVictory() {
     gameOver = 'red';
   }
 
-  if (teamAlive[1] === 0 || teamCamps[0] === total) gameOver = 'blue';
+  // Смерть всех активных (не-waiting) юнитов красных — активируем их резервистов
+  var activeRed = 0;
+  for (var _ar = 0; _ar < units.length; _ar++) {
+    var _aru = units[_ar];
+    if (_aru.alive && _aru.team === 1 && !_aru.waiting && !_aru.isNeutral) activeRed++;
+  }
+  if (activeRed === 0) {
+    var redReserveCamps = [];
+    for (var _rc = 0; _rc < camps.length; _rc++) {
+      var _rcamp = camps[_rc];
+      if (_rcamp.team !== 1) continue;
+      for (var _ru = 0; _ru < units.length; _ru++) {
+        var _ru2 = units[_ru];
+        if (_ru2.alive && _ru2.team === 1 && _ru2.waiting && _ru2.homecamp === _rcamp) {
+          redReserveCamps.push(_rcamp); break;
+        }
+      }
+    }
+    if (redReserveCamps.length > 0) {
+      // Выбираем ближайший к центру карты лагерь с резервом
+      var bestRC = redReserveCamps[0];
+      var bestRDist = Math.hypot(bestRC.x - MAP_W/2, bestRC.y - MAP_H/2);
+      for (var _brc = 1; _brc < redReserveCamps.length; _brc++) {
+        var _bd = Math.hypot(redReserveCamps[_brc].x - MAP_W/2, redReserveCamps[_brc].y - MAP_H/2);
+        if (_bd < bestRDist) { bestRDist = _bd; bestRC = redReserveCamps[_brc]; }
+      }
+      // Активируем резервистов этого лагеря
+      for (var _aw = 0; _aw < units.length; _aw++) {
+        var _awu = units[_aw];
+        if (_awu.alive && _awu.team === 1 && _awu.waiting && _awu.homecamp === bestRC) {
+          _awu.waiting = false;
+          _awu.group = 0;
+        }
+      }
+      // ИИ получает новую точку сбора
+      targets[1][0] = { x: bestRC.x, y: bestRC.y };
+      targets[1][1] = { x: bestRC.x, y: bestRC.y };
+      aiMode = 'rally'; aiModeTimer = 0;
+      return;
+    }
+    // Нет резерва — победа синих
+    gameOver = 'blue';
+    return;
+  }
+
+  if (teamCamps[0] === total) gameOver = 'blue';
   if (teamCamps[1] === total) gameOver = 'red';
 }
 
