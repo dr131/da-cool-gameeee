@@ -147,9 +147,12 @@ var ROUND_TIME  = 0.4;
 var REGEN_RATE  = 0.25;
 var ATK_DMG     = 1;
 var STUN_RATIO  = 0.5;
-var SPAWN_TIME    = 5;   // задержка перед первым респауном после смерти
-var CAMP_CAPACITY = 5;   // юнитов на лагерь
-var GLOBAL_LIMIT  = 50;  // максимум живых юнитов на карте
+var SPAWN_TIME         = 15;  // задержка перед первым респауном (замедлено 3×)
+var SPAWN_INTERVAL     = 15;  // интервал между бойцами в очереди (был 5)
+var SPAWN_INTERVAL_NEU = 22;  // нейтральный спавн — 50% медленнее игрока
+var CAMP_CAPACITY      = 5;   // юнитов на лагерь
+var NEUTRAL_CAMP_CAP   = 4;   // макс резервистов у нейтрального лагеря
+var GLOBAL_LIMIT       = 80;  // максимум живых юнитов на карте
 
 // ── Стамина / заряд ─────────────────────────────────────────
 var CHARGE_SPEED   = SPEED * 1.75;
@@ -348,15 +351,39 @@ function updateCamps(dt) {
       if (enemy) { capturecamp(camp, enemy.team); return; }
     }
 
-    // Спавн из очереди
+    // Нейтральный захваченный лагерь: периодически пополняет резерв до NEUTRAL_CAMP_CAP
+    if (camp.team === -1) {
+      var neutralWaiting = 0;
+      for (var _nw = 0; _nw < units.length; _nw++) {
+        var _nwu = units[_nw];
+        if (_nwu.alive && _nwu.homecamp === camp && _nwu.isNeutral) neutralWaiting++;
+      }
+      if (neutralWaiting < NEUTRAL_CAMP_CAP) {
+        camp.neutralSpawnTimer = (camp.neutralSpawnTimer || 0) - dt;
+        if (camp.neutralSpawnTimer <= 0) {
+          // Создаём нейтрального резервиста
+          var _ng = makeUnit(camp.x + (Math.random()-0.5)*20, camp.y + (Math.random()-0.5)*20, 2, 0, true);
+          _ng.isNeutral = true;
+          _ng.campGuard = camp;
+          _ng.homecamp  = camp;
+          _ng.waiting   = true;
+          units.push(_ng);
+          aliveCount++; teamAlive[2]++;
+          camp.neutralSpawnTimer = SPAWN_INTERVAL_NEU;
+        }
+      }
+      return;
+    }
+
+    // Спавн из очереди (игрок/ИИ)
     if (camp.pending > 0) {
       camp.spawnTimer -= dt;
       if (camp.spawnTimer <= 0) {
         if (spawnCampUnit(camp, true)) { // подкрепление — ждёт у лагеря
           camp.pending--;
-          camp.spawnTimer = camp.pending > 0 ? 5 : 0; // 5с между бойцами в партии
+          camp.spawnTimer = camp.pending > 0 ? SPAWN_INTERVAL : 0;
         } else {
-          camp.spawnTimer = 3; // глобальный лимит — подождём
+          camp.spawnTimer = 5; // глобальный лимит — подождём
         }
       }
     }
@@ -578,6 +605,10 @@ canvas.addEventListener('touchmove', function(e) {
     // Пока 2 пальца на экране после сплита — двигаем группы к пальцам
     setTarget(0, 0, getPos(e.touches[0].clientX, e.touches[0].clientY));
     setTarget(0, 1, getPos(e.touches[1].clientX, e.touches[1].clientY));
+    // Камера следит за той группой, чей палец двигался последним
+    var _mv0 = Math.hypot(e.touches[0].clientX - lastTouchX, e.touches[0].clientY - lastTouchY);
+    var _mv1 = Math.hypot(e.touches[1].clientX - lastTouchX, e.touches[1].clientY - lastTouchY);
+    touchActiveGroup = _mv0 > _mv1 ? 0 : 1;
   }
 }, { passive: false });
 
@@ -847,7 +878,14 @@ function retreatUnit(unit) {
         Math.hypot(u.x - unit.x, u.y - unit.y) < 200) allies.push(u);
   });
   if (allies.length === 0) {
-    captureUnit(unit);
+    // Определяем захватчика (ближайший живой враг или нейтрал)
+    var _captor = null, _captorDist = Infinity;
+    forNearby(unit.x, unit.y, 200, function(_cu) {
+      if (!_cu.alive || _cu.team === unit.team) return;
+      var _cd = Math.hypot(_cu.x - unit.x, _cu.y - unit.y);
+      if (_cd < _captorDist) { _captorDist = _cd; _captor = _cu; }
+    });
+    captureUnit(unit, _captor ? _captor.team : (1 - unit.team));
   } else {
     disengageUnit(unit);
     // Юнит лично бежит к базе — не двигаем цель всей группы
@@ -857,13 +895,23 @@ function retreatUnit(unit) {
   }
 }
 
-function captureUnit(unit) {
+function captureUnit(unit, captorTeam) {
   if (unit.isNeutral) return;
   disengageUnit(unit);
   unit.colorFrom = unit.team;
   teamAlive[unit.team]--;
-  unit.team = 1 - unit.team;
-  teamAlive[unit.team]++;
+  // Если захватчик — нейтрал (camp.team === -1 → captorTeam === -1),
+  // юнит становится нейтральным, иначе переходит к захватчику
+  if (captorTeam === -1 || captorTeam === 2) {
+    unit.team = 2;
+    unit.isNeutral = true;
+    unit.isSmall = true;
+    unit.campGuard = null;
+    teamAlive[2]++;
+  } else {
+    unit.team = captorTeam !== undefined ? captorTeam : 1 - unit.team;
+    teamAlive[unit.team]++;
+  }
   unit.group = 0;
   unit.hp = Math.ceil(unit.maxHp * 0.5);
   unit.retreating = false;
@@ -1485,8 +1533,14 @@ function draw() {
 
 // ── Loop ───────────────────────────────────────────────────
 function updateCamera(dt) {
-  // Следим за активными синими (не отступающими), иначе за всеми
-  var blues = units.filter(function(u){ return u.alive && u.team === 0 && !u.retreating; });
+  // В режиме сплита следим за группой, которую двигали последней (touchActiveGroup)
+  // иначе — центроид всех активных синих
+  var blues;
+  if (isSplit) {
+    blues = units.filter(function(u){ return u.alive && u.team === 0 && u.group === touchActiveGroup && !u.retreating; });
+    if (blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0 && u.group === touchActiveGroup; });
+  }
+  if (!blues || blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0 && !u.retreating; });
   if (blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0; });
   if (blues.length > 0) {
     var cx = blues.reduce(function(s,u){return s+u.x;},0) / blues.length;
