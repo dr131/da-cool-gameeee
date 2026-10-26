@@ -1516,6 +1516,10 @@ var aiFocusSwitchTimer = 0;     // кулдаун переключения фо�
 var AI_FOCUS_SWITCH_TIME = 2.5; // сек между переключениями
 var AI_VIEW_RADIUS = 380;       // радиус обзора ИИ
 
+// ── ИИ: отслеживание пути игрока ───────────────────────────
+var _prevPlayerTarget = { x: 80, y: MAP_H / 2 }; // предыдущая цель игрока
+var _playerMoveVec    = { x: 0, y: 0 };           // нормализованный вектор движения
+
 var aiLog = '';
 function updateAI(dt) {
   aiTimer -= dt;
@@ -1612,6 +1616,41 @@ function updateAI(dt) {
       var _rd = Math.hypot(_rc2.x - cAll.x, _rc2.y - cAll.y);
       if (_rd < rallyDist) { rallyDist = _rd; rallyTarget = _rc2; }
     }
+  }
+
+  // ── Обновление вектора движения игрока ───────────────────
+  var _pt = targets[0][0];
+  var _pdx = _pt.x - _prevPlayerTarget.x, _pdy = _pt.y - _prevPlayerTarget.y;
+  var _pdist = Math.hypot(_pdx, _pdy);
+  if (_pdist > 10) { // игрок сменил цель
+    _playerMoveVec.x = _pdx / _pdist;
+    _playerMoveVec.y = _pdy / _pdist;
+    _prevPlayerTarget.x = _pt.x; _prevPlayerTarget.y = _pt.y;
+  }
+
+  // Предсказываем угрозу лагерям: игрок идёт к лагерю ИИ?
+  var interceptTarget = null, interceptScore = -Infinity;
+  for (var _ic = 0; _ic < camps.length; _ic++) {
+    var _icamp = camps[_ic];
+    if (_icamp.team !== 1) continue;
+    var _dtoCamp = Math.hypot(_pt.x - _icamp.x, _pt.y - _icamp.y);
+    if (_dtoCamp > 500) continue; // слишком далеко
+    // Проекция вектора движения игрока на направление к нашему лагерю
+    var _dirX = (_icamp.x - _pt.x) / (_dtoCamp + 0.1);
+    var _dirY = (_icamp.y - _pt.y) / (_dtoCamp + 0.1);
+    var _dot = _playerMoveVec.x * _dirX + _playerMoveVec.y * _dirY;
+    if (_dot > 0.55) { // игрок движется к нашему лагерю
+      var _score = _dot * 100 - _dtoCamp * 0.2;
+      if (_score > interceptScore) { interceptScore = _score; interceptTarget = _icamp; }
+    }
+  }
+  // Точка перехвата: на полпути между текущей позицией игрока и лагерем
+  var interceptPoint = null;
+  if (interceptTarget) {
+    interceptPoint = {
+      x: (_pt.x + interceptTarget.x) / 2,
+      y: (_pt.y + interceptTarget.y) / 2
+    };
   }
 
   // ── Локальное соотношение ─────────────────────────────────
@@ -1723,6 +1762,32 @@ function updateAI(dt) {
     tx = raidTarget.x; ty = raidTarget.y;
     chosenMode = 'raid';
     aiModeTimer = 6;
+  // Приоритет 4.5: ПЕРЕХВАТ (игрок идёт к нашему лагерю → высылаем заслон)
+  } else if (interceptPoint && ratio >= 0.8 && aiModeTimer <= 0) {
+    if (aiSplit) {
+      // В сплите: фокусная группа идёт на перехват, другая держит позицию
+      tx = interceptPoint.x; ty = interceptPoint.y;
+      chosenMode = 'intercept';
+      aiModeTimer = 4;
+    } else if (redsActive.length >= 6) {
+      // Не в сплите и достаточно юнитов: разделяемся, одна группа — заслон
+      aiSplit = true;
+      var _isa = redsActive.slice();
+      _isa.forEach(function(u, i) { u.group = i < Math.ceil(_isa.length / 2) ? 0 : 1; });
+      aiFocusGroup = 0;
+      aiFocusSwitchTimer = AI_FOCUS_SWITCH_TIME;
+      // Группа 1 сразу идёт на перехват
+      targets[1][1] = { x: interceptPoint.x, y: interceptPoint.y };
+      tx = nearestBlue ? nearestBlue.x : interceptPoint.x;
+      ty = nearestBlue ? nearestBlue.y : interceptPoint.y;
+      chosenMode = 'intercept';
+      aiModeTimer = 5;
+    } else {
+      // Мало юнитов — просто идём навстречу
+      tx = interceptPoint.x; ty = interceptPoint.y;
+      chosenMode = 'intercept';
+      aiModeTimer = 3;
+    }
   // Приоритет 5: ЗАХВАТ ЛАГЕРЯ
   } else if (campTarget && aiModeTimer <= 0) {
     if (nearestBlue && nearestBlueDist < 140 && ratio >= 1.4) {
@@ -1749,7 +1814,8 @@ function updateAI(dt) {
   aiLog = 'AI[' + chosenMode + (aiSplit ? ' SPLIT:' + aiFocusGroup : '') + ']' +
           ' r=' + redsActive.length + '(+' + totalWaitingRed + 'w)' +
           ' b=' + blues.length + ' vis=' + visBlues.length +
-          ' ratio=' + ratio.toFixed(1);
+          ' ratio=' + ratio.toFixed(1) +
+          (interceptTarget ? ' INTCPT→' + interceptTarget.team : '');
 
   // Команда только активной группе (или обеим если не сплит)
   if (aiSplit) {
