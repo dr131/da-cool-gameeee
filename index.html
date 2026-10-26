@@ -1504,189 +1504,263 @@ function updateCamera(dt) {
 // ── AI (красные) ───────────────────────────────────────────
 var aiTimer = 0;
 var AI_INTERVAL = 2.5;
-var aiMode = 'camp'; // 'camp' | 'raid' | 'flank' | 'retreat'
-var aiModeTimer = 0; // блокировка смены режима
+var aiMode = 'camp'; // 'camp' | 'raid' | 'flank' | 'retreat' | 'split-attack' | 'split-cap'
+var aiModeTimer = 0;
+
+// ── ИИ: разделение и обзор ─────────────────────────────────
+var aiSplit = false;
+var aiFocusGroup = 0;           // 0 или 1 — на какую группу смотрит ИИ
+var aiFocusX = MAP_W - 80;      // виртуальная камера ИИ
+var aiFocusY = MAP_H / 2;
+var aiFocusSwitchTimer = 0;     // кулдаун переключения фокуса
+var AI_FOCUS_SWITCH_TIME = 2.5; // сек между переключениями
+var AI_VIEW_RADIUS = 380;       // радиус обзора ИИ
 
 var aiLog = '';
 function updateAI(dt) {
   aiTimer -= dt;
-  aiModeTimer = Math.max(0, aiModeTimer - dt);
+  aiModeTimer      = Math.max(0, aiModeTimer - dt);
+  aiFocusSwitchTimer = Math.max(0, aiFocusSwitchTimer - dt);
   if (aiTimer > 0) return;
   aiTimer = AI_INTERVAL;
 
-  var reds = [], blues = [];
+  // ── Все живые красные (активные и ждущие отдельно) ────────
+  var redsAll = [], redsActive = [], blues = [];
   for (var _ai = 0; _ai < units.length; _ai++) {
     var _u = units[_ai];
     if (!_u.alive) continue;
-    if (_u.team === 1 && !_u.retreating) reds.push(_u);
+    if (_u.team === 1) { redsAll.push(_u); if (!_u.waiting && !_u.isNeutral) redsActive.push(_u); }
     if (_u.team === 0) blues.push(_u);
   }
-  if (reds.length === 0) return;
+  if (redsActive.length === 0) return;
 
-  // Центр масс красных
-  var rx = 0, ry = 0;
-  for (var _r = 0; _r < reds.length; _r++) { rx += reds[_r].x; ry += reds[_r].y; }
-  rx /= reds.length; ry /= reds.length;
-
-  // Центр масс синих
-  var bx = 0, by = 0;
-  for (var _bb = 0; _bb < blues.length; _bb++) { bx += blues[_bb].x; by += blues[_bb].y; }
-  if (blues.length > 0) { bx /= blues.length; by /= blues.length; }
-
-  var ratio = reds.length / Math.max(1, blues.length);
-
-  // Ближайший синий к центру красных
-  var nearestBlue = null, nearestBlueDist = Infinity;
-  for (var _b = 0; _b < blues.length; _b++) {
-    var _d = Math.hypot(blues[_b].x - rx, blues[_b].y - ry);
-    if (_d < nearestBlueDist) { nearestBlueDist = _d; nearestBlue = blues[_b]; }
+  // ── Центры масс групп ─────────────────────────────────────
+  function centroid(arr) {
+    var cx = 0, cy = 0;
+    for (var _i = 0; _i < arr.length; _i++) { cx += arr[_i].x; cy += arr[_i].y; }
+    return arr.length ? { x: cx / arr.length, y: cy / arr.length } : { x: MAP_W - 80, y: MAP_H / 2 };
   }
 
-  // Анализ лагерей: незащищённые синие, нейтральные, наши
-  var raidTarget = null, raidScore = -Infinity; // незащищённая база синих
-  var campTarget = null, campDist = Infinity;   // нейтральный лагерь
+  var g0 = redsActive.filter(function(u) { return u.group === 0; });
+  var g1 = redsActive.filter(function(u) { return u.group === 1; });
+  var c0 = centroid(g0.length ? g0 : redsActive);
+  var c1 = centroid(g1.length ? g1 : redsActive);
+  var cAll = centroid(redsActive);
+
+  // ── Виртуальная камера ИИ: следует за фокусной группой ────
+  var focusCentroid = aiFocusGroup === 0 ? c0 : c1;
+  aiFocusX += (focusCentroid.x - aiFocusX) * 0.5;
+  aiFocusY += (focusCentroid.y - aiFocusY) * 0.5;
+
+  // ── Видимые синие (в радиусе обзора от виртуальной камеры) ─
+  var visBlues = blues.filter(function(u) {
+    return Math.hypot(u.x - aiFocusX, u.y - aiFocusY) < AI_VIEW_RADIUS;
+  });
+  var ratio = redsActive.length / Math.max(1, blues.length);
+
+  // ── Ближайший видимый синий к фокусной группе ─────────────
+  var nearestBlue = null, nearestBlueDist = Infinity;
+  for (var _b = 0; _b < visBlues.length; _b++) {
+    var _d = Math.hypot(visBlues[_b].x - focusCentroid.x, visBlues[_b].y - focusCentroid.y);
+    if (_d < nearestBlueDist) { nearestBlueDist = _d; nearestBlue = visBlues[_b]; }
+  }
+
+  // ── Анализ лагерей (только видимые или свои) ──────────────
+  var raidTarget = null, raidScore = -Infinity;
+  var campTarget = null, campDist = Infinity;
   for (var _c = 0; _c < camps.length; _c++) {
     var camp = camps[_c];
-    // Считаем защитников (синих поблизости)
+    var inView = Math.hypot(camp.x - aiFocusX, camp.y - aiFocusY) < AI_VIEW_RADIUS * 1.3;
+    var isOwn  = camp.team === 1;
+    if (!inView && !isOwn) continue;
     var guardCount = 0;
     forNearby(camp.x, camp.y, 120, function(_gu) {
       if (_gu.alive && _gu.team === 0) guardCount++;
     });
     if (camp.team === 0) {
-      // База синих — оцениваем привлекательность: близко + мало защитников = высокий скор
-      var _dist = Math.hypot(camp.x - rx, camp.y - ry);
+      var _dist = Math.hypot(camp.x - cAll.x, camp.y - cAll.y);
       var score = -guardCount * 40 - _dist * 0.3;
       if (score > raidScore) { raidScore = score; raidTarget = camp; }
     } else if (camp.team !== 1) {
-      // Нейтральный
-      var _cd = Math.hypot(camp.x - rx, camp.y - ry);
+      var _cd = Math.hypot(camp.x - focusCentroid.x, camp.y - focusCentroid.y);
       if (_cd < campDist) { campDist = _cd; campTarget = camp; }
     }
   }
 
-  // Фланговая точка: перпендикуляр к центру синих, на 150px в сторону
-  var dx = bx - rx, dy = by - ry;
+  // ── Фланговая точка ───────────────────────────────────────
+  var bCentroid = centroid(visBlues.length ? visBlues : blues);
+  var dx = bCentroid.x - focusCentroid.x, dy = bCentroid.y - focusCentroid.y;
   var dlen = Math.hypot(dx, dy) || 1;
-  var perpX = -dy / dlen, perpY = dx / dlen; // перпендикуляр
-  var flankDist = 200;
-  var flankX = bx + perpX * flankDist;
-  var flankY = by + perpY * flankDist;
-  // Ограничим внутрь карты
-  flankX = Math.max(50, Math.min(MAP_W - 50, flankX));
-  flankY = Math.max(50, Math.min(MAP_H - 50, flankY));
+  var perpX = -dy / dlen, perpY = dx / dlen;
+  var flankX = Math.max(50, Math.min(MAP_W-50, bCentroid.x + perpX * 200));
+  var flankY = Math.max(50, Math.min(MAP_H-50, bCentroid.y + perpY * 200));
 
-  // Лагерь красных с ждущими резервистами (ближайший к центру масс красных)
+  // ── Резервные лагеря красных ──────────────────────────────
   var rallyTarget = null, rallyDist = Infinity;
+  var totalWaitingRed = 0;
+  for (var _rw = 0; _rw < units.length; _rw++) {
+    if (units[_rw].alive && units[_rw].team === 1 && units[_rw].waiting) totalWaitingRed++;
+  }
   for (var _rc = 0; _rc < camps.length; _rc++) {
     var _rc2 = camps[_rc];
     if (_rc2.team !== 1) continue;
-    var hasWaiting2 = false;
-    for (var _rw = 0; _rw < units.length; _rw++) {
-      var _wr = units[_rw];
-      if (_wr.alive && _wr.team === 1 && _wr.waiting && _wr.homecamp === _rc2) { hasWaiting2 = true; break; }
+    var hasW = false;
+    for (var _rr2 = 0; _rr2 < units.length; _rr2++) {
+      if (units[_rr2].alive && units[_rr2].team === 1 && units[_rr2].waiting && units[_rr2].homecamp === _rc2) { hasW = true; break; }
     }
-    if (hasWaiting2) {
-      var _rd = Math.hypot(_rc2.x - rx, _rc2.y - ry);
+    if (hasW) {
+      var _rd = Math.hypot(_rc2.x - cAll.x, _rc2.y - cAll.y);
       if (_rd < rallyDist) { rallyDist = _rd; rallyTarget = _rc2; }
     }
   }
 
-  // Считаем ждущих резервистов красных (всего, не только у ближайшего лагеря)
-  var totalWaitingRed = 0;
-  for (var _tw = 0; _tw < units.length; _tw++) {
-    if (units[_tw].alive && units[_tw].team === 1 && units[_tw].waiting) totalWaitingRed++;
-  }
-
-  // Локальное соотношение: синих в радиусе 200 от центра красных
+  // ── Локальное соотношение ─────────────────────────────────
   var localBlues = 0;
   for (var _lb = 0; _lb < blues.length; _lb++) {
-    if (Math.hypot(blues[_lb].x - rx, blues[_lb].y - ry) < 200) localBlues++;
+    if (Math.hypot(blues[_lb].x - cAll.x, blues[_lb].y - cAll.y) < 200) localBlues++;
   }
-  var localRatio = reds.length / Math.max(1, localBlues); // > 1 = мы сильнее локально
+  var localRatio = redsActive.length / Math.max(1, localBlues);
 
+  // ════════════════════════════════════════════════════════════
+  // ── РЕШЕНИЕ О РАЗДЕЛЕНИИ / ОБЪЕДИНЕНИИ ────────────────────
+  // ════════════════════════════════════════════════════════════
+  var groupsDist = Math.hypot(c0.x - c1.x, c0.y - c1.y);
+
+  // Объединяем если: мало юнитов, уступаем, группы уже рядом, или одна из групп пуста
+  var shouldMerge = aiSplit && (
+    redsActive.length < 6 ||
+    ratio < 0.7 ||
+    groupsDist < 80 ||
+    g0.length === 0 || g1.length === 0
+  );
+  if (shouldMerge) {
+    aiSplit = false;
+    aiFocusGroup = 0;
+    for (var _mg = 0; _mg < units.length; _mg++) {
+      if (units[_mg].alive && units[_mg].team === 1) units[_mg].group = 0;
+    }
+  }
+
+  // Разделяем если: достаточно юнитов, есть два разных объекта, режим не экстренный
+  var canSplit = !aiSplit && redsActive.length >= 8 && ratio >= 0.9 && aiModeTimer <= 0;
+  if (canSplit && campTarget && nearestBlue) {
+    var campDir  = Math.hypot(campTarget.x - cAll.x, campTarget.y - cAll.y);
+    var enemyDir = Math.hypot(nearestBlue.x - cAll.x, nearestBlue.y - cAll.y);
+    // Цели в разных направлениях (угол > 60°)?
+    var dotProd = ((campTarget.x - cAll.x) * (nearestBlue.x - cAll.x) +
+                   (campTarget.y - cAll.y) * (nearestBlue.y - cAll.y)) /
+                  (campDir * enemyDir + 0.001);
+    if (dotProd < 0.5 && campDir > 100 && enemyDir > 80) {
+      aiSplit = true;
+      // Делим пополам: первая половина → группа 0, вторая → группа 1
+      var _sa = redsActive.slice(); // копия
+      _sa.forEach(function(u, i) { u.group = i < Math.ceil(_sa.length / 2) ? 0 : 1; });
+      aiFocusGroup = 0;
+      aiFocusSwitchTimer = AI_FOCUS_SWITCH_TIME;
+      // Группа 1 сразу получает цель: лагерь
+      targets[1][1] = { x: campTarget.x, y: campTarget.y };
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // ── ПЕРЕКЛЮЧЕНИЕ ФОКУСА (только по таймеру) ───────────────
+  // ════════════════════════════════════════════════════════════
+  if (aiSplit && aiFocusSwitchTimer <= 0) {
+    // Переключаем фокус на группу которая сейчас важнее
+    var g0Score = 0, g1Score = 0;
+    // Угроза синих поблизости
+    for (var _fs = 0; _fs < blues.length; _fs++) {
+      var _fd0 = Math.hypot(blues[_fs].x - c0.x, blues[_fs].y - c0.y);
+      var _fd1 = Math.hypot(blues[_fs].x - c1.x, blues[_fs].y - c1.y);
+      if (_fd0 < 150) g0Score += 2;
+      if (_fd1 < 150) g1Score += 2;
+    }
+    // Маленькая группа требует внимания
+    if (g0.length < g1.length) g0Score += 1;
+    else g1Score += 1;
+
+    var newFocus = g0Score >= g1Score ? 0 : 1;
+    if (newFocus !== aiFocusGroup) {
+      aiFocusGroup = newFocus;
+      aiFocusSwitchTimer = AI_FOCUS_SWITCH_TIME;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // ── КОМАНДЫ ДЛЯ АКТИВНОЙ (ФОКУСНОЙ) ГРУППЫ ───────────────
+  // ════════════════════════════════════════════════════════════
   var tx, ty, chosenMode;
 
-  // ── Приоритет 1: СБОР РЕЗЕРВА ─────────────────────────────
-  // Если резервисты есть И (уступаем глобально ИЛИ встречаем большой отряд локально)
-  var wantRally = rallyTarget && ratio < 0.75;
-  if (wantRally) {
+  // Приоритет 1: СБОР РЕЗЕРВА
+  if (rallyTarget && ratio < 0.75) {
     tx = rallyTarget.x; ty = rallyTarget.y;
     chosenMode = 'rally';
     aiTimer = 1.0;
-    // Режим отступления для всех красных пока идём к резерву
     for (var _rv = 0; _rv < units.length; _rv++) {
       if (units[_rv].alive && units[_rv].team === 1 && !units[_rv].campGuard) {
         units[_rv].retreating = true;
         units[_rv]._retreatX = tx; units[_rv]._retreatY = ty;
       }
     }
-
-  // ── Приоритет 2: ОТСТУПЛЕНИЕ (нет резерва, сильно уступаем) ─
+  // Приоритет 2: ОТСТУПЛЕНИЕ (нет резерва)
   } else if (ratio < 0.5) {
-    // Отходим на базу
     tx = MAP_W - 80; ty = MAP_H / 2;
     chosenMode = 'retreat';
     aiTimer = 1.5;
-
-  // ── Приоритет 3: БЕГСТВО от превосходящего локального врага ─
+  // Приоритет 3: БЕГСТВО от локального превосходства
   } else if (localRatio < 0.65 && localBlues > 2 && aiModeTimer <= 0) {
-    // Убегаем в сторону ближайшего своего лагеря или базы
-    var escapeX = MAP_W - 80, escapeY = MAP_H / 2;
-    var escapeDist = Infinity;
+    var escapeX = MAP_W - 80, escapeY = MAP_H / 2, escapeDist = Infinity;
     for (var _ec = 0; _ec < camps.length; _ec++) {
       if (camps[_ec].team !== 1) continue;
-      var _ed = Math.hypot(camps[_ec].x - rx, camps[_ec].y - ry);
+      var _ed = Math.hypot(camps[_ec].x - cAll.x, camps[_ec].y - cAll.y);
       if (_ed < escapeDist) { escapeDist = _ed; escapeX = camps[_ec].x; escapeY = camps[_ec].y; }
     }
     tx = escapeX; ty = escapeY;
     chosenMode = 'retreat';
     aiModeTimer = 4;
-
-  // ── Приоритет 4: РЕЙД на незащищённую базу синих ──────────
+  // Приоритет 4: РЕЙД
   } else if (raidTarget && raidScore > -200 && ratio >= 0.85 && aiModeTimer <= 0) {
     tx = raidTarget.x; ty = raidTarget.y;
     chosenMode = 'raid';
     aiModeTimer = 6;
-
-  // ── Приоритет 5: ЗАХВАТ нейтрального лагеря ───────────────
+  // Приоритет 5: ЗАХВАТ ЛАГЕРЯ
   } else if (campTarget && aiModeTimer <= 0) {
     if (nearestBlue && nearestBlueDist < 140 && ratio >= 1.4) {
-      tx = nearestBlue.x; ty = nearestBlue.y;
-      chosenMode = 'attack';
+      tx = nearestBlue.x; ty = nearestBlue.y; chosenMode = 'attack';
     } else {
-      tx = campTarget.x; ty = campTarget.y;
-      chosenMode = 'camp';
+      tx = campTarget.x; ty = campTarget.y; chosenMode = 'camp';
     }
-
-  // ── Приоритет 6: ДОКОМПЛЕКТОВАНИЕ (есть резерв, всё спокойно) ─
+  // Приоритет 6: ДОКОМПЛЕКТОВАНИЕ
   } else if (rallyTarget && totalWaitingRed > 0 && ratio < 1.1 && aiModeTimer <= 0) {
-    // Не критично, но резерв есть — собираем между боями
     tx = rallyTarget.x; ty = rallyTarget.y;
-    chosenMode = 'rally';
-    aiModeTimer = 5;
-
-  // ── Приоритет 7: ФЛАНГ при превосходстве ──────────────────
+    chosenMode = 'rally'; aiModeTimer = 5;
+  // Приоритет 7: ФЛАНГ
   } else if (nearestBlue && ratio >= 1.3 && aiModeTimer <= 0) {
-    chosenMode = 'flank';
     tx = flankX; ty = flankY;
-    aiModeTimer = 5;
-
-  // ── Приоритет 8: ПРЯМАЯ АТАКА ─────────────────────────────
+    chosenMode = 'flank'; aiModeTimer = 5;
+  // Приоритет 8: АТАКА
   } else if (nearestBlue) {
-    tx = nearestBlue.x; ty = nearestBlue.y;
-    chosenMode = 'attack';
+    tx = nearestBlue.x; ty = nearestBlue.y; chosenMode = 'attack';
   } else {
-    tx = MAP_W - 150; ty = MAP_H / 2;
-    chosenMode = 'idle';
+    tx = MAP_W - 150; ty = MAP_H / 2; chosenMode = 'idle';
   }
 
   aiMode = chosenMode;
-  aiLog = 'AI[' + chosenMode + ']: r=' + reds.length + '(+' + totalWaitingRed + 'w) b=' + blues.length +
-          ' ratio=' + ratio.toFixed(1) + ' loc=' + localRatio.toFixed(1);
-  targets[1][0] = { x: tx, y: ty };
-  targets[1][1] = { x: tx, y: ty };
+  aiLog = 'AI[' + chosenMode + (aiSplit ? ' SPLIT:' + aiFocusGroup : '') + ']' +
+          ' r=' + redsActive.length + '(+' + totalWaitingRed + 'w)' +
+          ' b=' + blues.length + ' vis=' + visBlues.length +
+          ' ratio=' + ratio.toFixed(1);
 
-  // Сбрасываем отступление если не в режиме бегства/сбора
+  // Команда только активной группе (или обеим если не сплит)
+  if (aiSplit) {
+    targets[1][aiFocusGroup] = { x: tx, y: ty };
+    // Неактивная группа держит свою цель (не перезаписываем)
+  } else {
+    targets[1][0] = { x: tx, y: ty };
+    targets[1][1] = { x: tx, y: ty };
+  }
+
+  // Сбрасываем retreating если не отступаем
   if (chosenMode !== 'retreat' && chosenMode !== 'rally') {
     for (var _rr = 0; _rr < units.length; _rr++) {
       if (units[_rr].alive && units[_rr].team === 1 && !units[_rr].campGuard) {
