@@ -447,9 +447,22 @@ function checkRetreat(pos, team, group) {
   return dot / (lenE * lenT) < -0.5;
 }
 
+// Клампинг цели к прямоугольному вьюпорту (мировые координаты)
+function clampToViewport(px, py, vx, vy, vw, vh) {
+  return {
+    x: Math.max(vx + 15, Math.min(vx + vw - 15, px)),
+    y: Math.max(vy + 15, Math.min(vy + vh - 15, py))
+  };
+}
+
 function setTarget(team, group, pos) {
-  targets[team][group] = pos;
-  groupRetreating[team][group] = checkRetreat(pos, team, group);
+  var p = pos;
+  // Игрок: цель ограничена текущим вьюпортом камеры
+  if (team === 0) {
+    p = clampToViewport(pos.x, pos.y, camX, camY, W / ZOOM, H / ZOOM);
+  }
+  targets[team][group] = p;
+  groupRetreating[team][group] = checkRetreat(p, team, group);
   units.forEach(u => {
     if (u.team === team && u.group === group)
       u.retreating = groupRetreating[team][group];
@@ -1533,18 +1546,31 @@ function draw() {
 
 // ── Loop ───────────────────────────────────────────────────
 function updateCamera(dt) {
-  // В режиме сплита следим за группой, которую двигали последней (touchActiveGroup)
-  // иначе — центроид всех активных синих
-  var blues;
-  if (isSplit) {
-    blues = units.filter(function(u){ return u.alive && u.team === 0 && u.group === touchActiveGroup && !u.retreating; });
-    if (blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0 && u.group === touchActiveGroup; });
-  }
-  if (!blues || blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0 && !u.retreating; });
-  if (blues.length === 0) blues = units.filter(function(u){ return u.alive && u.team === 0; });
-  if (blues.length > 0) {
-    var cx = blues.reduce(function(s,u){return s+u.x;},0) / blues.length;
-    var cy = blues.reduce(function(s,u){return s+u.y;},0) / blues.length;
+  var allBlues = units.filter(function(u){ return u.alive && u.team === 0; });
+  var activeBlues = allBlues.filter(function(u){ return !u.retreating; });
+  var src = activeBlues.length ? activeBlues : allBlues;
+
+  if (src.length > 0) {
+    var cx, cy;
+    if (isSplit) {
+      // Центр между двумя группами
+      var g0b = src.filter(function(u){ return u.group === 0; });
+      var g1b = src.filter(function(u){ return u.group === 1; });
+      if (g0b.length > 0 && g1b.length > 0) {
+        var c0x = g0b.reduce(function(s,u){return s+u.x;},0) / g0b.length;
+        var c0y = g0b.reduce(function(s,u){return s+u.y;},0) / g0b.length;
+        var c1x = g1b.reduce(function(s,u){return s+u.x;},0) / g1b.length;
+        var c1y = g1b.reduce(function(s,u){return s+u.y;},0) / g1b.length;
+        cx = (c0x + c1x) / 2;
+        cy = (c0y + c1y) / 2;
+      } else {
+        cx = src.reduce(function(s,u){return s+u.x;},0) / src.length;
+        cy = src.reduce(function(s,u){return s+u.y;},0) / src.length;
+      }
+    } else {
+      cx = src.reduce(function(s,u){return s+u.x;},0) / src.length;
+      cy = src.reduce(function(s,u){return s+u.y;},0) / src.length;
+    }
     camTargetX = cx - W / (2*ZOOM);
     camTargetY = cy - H / (2*ZOOM);
   }
@@ -1605,10 +1631,19 @@ function updateAI(dt) {
   var c1 = centroid(g1.length ? g1 : redsActive);
   var cAll = centroid(redsActive);
 
-  // ── Виртуальная камера ИИ: следует за фокусной группой ────
-  var focusCentroid = aiFocusGroup === 0 ? c0 : c1;
-  aiFocusX += (focusCentroid.x - aiFocusX) * 0.5;
-  aiFocusY += (focusCentroid.y - aiFocusY) * 0.5;
+  // ── Виртуальная камера ИИ: при сплите — центр между группами ─
+  var aiCamTarget;
+  if (aiSplit && g0.length > 0 && g1.length > 0) {
+    aiCamTarget = { x: (c0.x + c1.x) / 2, y: (c0.y + c1.y) / 2 };
+  } else {
+    var focusCentroid = aiFocusGroup === 0 ? c0 : c1;
+    aiCamTarget = focusCentroid;
+  }
+  aiFocusX += (aiCamTarget.x - aiFocusX) * 0.5;
+  aiFocusY += (aiCamTarget.y - aiFocusY) * 0.5;
+  // Прямоугольный вьюпорт ИИ (соответствует AI_VIEW_RADIUS)
+  var aiVW = AI_VIEW_RADIUS * 2, aiVH = AI_VIEW_RADIUS * 2;
+  var aiVX = aiFocusX - AI_VIEW_RADIUS, aiVY = aiFocusY - AI_VIEW_RADIUS;
 
   // ── Видимые синие (в радиусе обзора от виртуальной камеры) ─
   var visBlues = blues.filter(function(u) {
@@ -1871,10 +1906,19 @@ function updateAI(dt) {
           ' ratio=' + ratio.toFixed(1) +
           (interceptTarget ? ' INTCPT→' + interceptTarget.team : '');
 
+  // Клампим цель к вьюпорту ИИ
+  var _aiClamped = clampToViewport(tx, ty, aiVX, aiVY, aiVW, aiVH);
+  tx = _aiClamped.x; ty = _aiClamped.y;
+
   // Команда только активной группе (или обеим если не сплит)
   if (aiSplit) {
     targets[1][aiFocusGroup] = { x: tx, y: ty };
-    // Неактивная группа держит свою цель (не перезаписываем)
+    // Неактивная группа держит свою цель, но тоже клампим к вьюпорту
+    var _other = 1 - aiFocusGroup;
+    if (targets[1][_other]) {
+      var _oc = clampToViewport(targets[1][_other].x, targets[1][_other].y, aiVX, aiVY, aiVW, aiVH);
+      targets[1][_other] = _oc;
+    }
   } else {
     targets[1][0] = { x: tx, y: ty };
     targets[1][1] = { x: tx, y: ty };
