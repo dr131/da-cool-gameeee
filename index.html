@@ -1688,8 +1688,8 @@ function updateAI(dt) {
       if (_cd < campDist) { campDist = _cd; campTarget = camp; }
     }
 
-    // Любой незащищённый лагерь (синий или нейтральный) без охраны ─ отвоевать
-    if (camp.team !== 1 && guardBlue === 0 && guardRed === 0) {
+    // Любой лагерь не красных — отвоевать если охрана меньше чем у ИИ
+    if (camp.team !== 1 && guardBlue <= redsActive.length * 0.6) {
       var _rd = Math.hypot(camp.x - cAll.x, camp.y - cAll.y);
       if (_rd < recapDist) { recapDist = _rd; recapTarget = camp; }
     }
