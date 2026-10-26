@@ -1546,41 +1546,91 @@ function updateAI(dt) {
     }
   }
 
+  // Считаем ждущих резервистов красных (всего, не только у ближайшего лагеря)
+  var totalWaitingRed = 0;
+  for (var _tw = 0; _tw < units.length; _tw++) {
+    if (units[_tw].alive && units[_tw].team === 1 && units[_tw].waiting) totalWaitingRed++;
+  }
+
+  // Локальное соотношение: синих в радиусе 200 от центра красных
+  var localBlues = 0;
+  for (var _lb = 0; _lb < blues.length; _lb++) {
+    if (Math.hypot(blues[_lb].x - rx, blues[_lb].y - ry) < 200) localBlues++;
+  }
+  var localRatio = reds.length / Math.max(1, localBlues); // > 1 = мы сильнее локально
+
   var tx, ty, chosenMode;
 
-  if (ratio < 0.55) {
-    // Сильно уступаем — сначала пробуем собрать резерв
-    if (rallyTarget) {
-      tx = rallyTarget.x; ty = rallyTarget.y;
-      chosenMode = 'rally';
-      aiTimer = 1.5;
-    } else {
-      tx = MAP_W - 80; ty = MAP_H / 2;
-      chosenMode = 'retreat';
-      aiTimer = 1.5;
+  // ── Приоритет 1: СБОР РЕЗЕРВА ─────────────────────────────
+  // Если резервисты есть И (уступаем глобально ИЛИ встречаем большой отряд локально)
+  var wantRally = rallyTarget && (
+    ratio < 0.75 ||                      // общее численное меньшинство
+    (localRatio < 0.7 && localBlues > 2) // локально окружены
+  );
+  if (wantRally) {
+    tx = rallyTarget.x; ty = rallyTarget.y;
+    chosenMode = 'rally';
+    aiTimer = 1.0;
+    // Режим отступления для всех красных пока идём к резерву
+    for (var _rv = 0; _rv < units.length; _rv++) {
+      if (units[_rv].alive && units[_rv].team === 1 && !units[_rv].campGuard) {
+        units[_rv].retreating = true;
+        units[_rv]._retreatX = tx; units[_rv]._retreatY = ty;
+      }
     }
-  } else if (raidTarget && guardCount <= 1 && ratio >= 0.9 && aiModeTimer <= 0) {
-    // Рейд: незащищённая или слабо защищённая база синих
+
+  // ── Приоритет 2: ОТСТУПЛЕНИЕ (нет резерва, сильно уступаем) ─
+  } else if (ratio < 0.5) {
+    // Отходим на базу
+    tx = MAP_W - 80; ty = MAP_H / 2;
+    chosenMode = 'retreat';
+    aiTimer = 1.5;
+
+  // ── Приоритет 3: БЕГСТВО от превосходящего локального врага ─
+  } else if (localRatio < 0.65 && localBlues > 2 && aiModeTimer <= 0) {
+    // Убегаем в сторону ближайшего своего лагеря или базы
+    var escapeX = MAP_W - 80, escapeY = MAP_H / 2;
+    var escapeDist = Infinity;
+    for (var _ec = 0; _ec < camps.length; _ec++) {
+      if (camps[_ec].team !== 1) continue;
+      var _ed = Math.hypot(camps[_ec].x - rx, camps[_ec].y - ry);
+      if (_ed < escapeDist) { escapeDist = _ed; escapeX = camps[_ec].x; escapeY = camps[_ec].y; }
+    }
+    tx = escapeX; ty = escapeY;
+    chosenMode = 'retreat';
+    aiModeTimer = 4;
+
+  // ── Приоритет 4: РЕЙД на незащищённую базу синих ──────────
+  } else if (raidTarget && raidScore > -200 && ratio >= 0.85 && aiModeTimer <= 0) {
     tx = raidTarget.x; ty = raidTarget.y;
     chosenMode = 'raid';
-    aiModeTimer = 6; // держим режим 6 секунд
+    aiModeTimer = 6;
+
+  // ── Приоритет 5: ЗАХВАТ нейтрального лагеря ───────────────
   } else if (campTarget && aiModeTimer <= 0) {
-    // Захват нейтрального лагеря — приоритет роста
     if (nearestBlue && nearestBlueDist < 140 && ratio >= 1.4) {
-      // Враг слишком близко и мы сильны — сначала атака
       tx = nearestBlue.x; ty = nearestBlue.y;
       chosenMode = 'attack';
     } else {
       tx = campTarget.x; ty = campTarget.y;
       chosenMode = 'camp';
     }
+
+  // ── Приоритет 6: ДОКОМПЛЕКТОВАНИЕ (есть резерв, всё спокойно) ─
+  } else if (rallyTarget && totalWaitingRed > 0 && ratio < 1.1 && aiModeTimer <= 0) {
+    // Не критично, но резерв есть — собираем между боями
+    tx = rallyTarget.x; ty = rallyTarget.y;
+    chosenMode = 'rally';
+    aiModeTimer = 5;
+
+  // ── Приоритет 7: ФЛАНГ при превосходстве ──────────────────
   } else if (nearestBlue && ratio >= 1.3 && aiModeTimer <= 0) {
-    // Превосходство — фланговый манёвр
     chosenMode = 'flank';
     tx = flankX; ty = flankY;
     aiModeTimer = 5;
+
+  // ── Приоритет 8: ПРЯМАЯ АТАКА ─────────────────────────────
   } else if (nearestBlue) {
-    // Прямая атака
     tx = nearestBlue.x; ty = nearestBlue.y;
     chosenMode = 'attack';
   } else {
@@ -1589,14 +1639,17 @@ function updateAI(dt) {
   }
 
   aiMode = chosenMode;
-  aiLog = 'AI[' + chosenMode + ']: r=' + reds.length + ' b=' + blues.length + ' ratio=' + ratio.toFixed(1);
+  aiLog = 'AI[' + chosenMode + ']: r=' + reds.length + '(+' + totalWaitingRed + 'w) b=' + blues.length +
+          ' ratio=' + ratio.toFixed(1) + ' loc=' + localRatio.toFixed(1);
   targets[1][0] = { x: tx, y: ty };
   targets[1][1] = { x: tx, y: ty };
 
-  // Сбрасываем отступление у красных если не отходим
-  for (var _rr = 0; _rr < units.length; _rr++) {
-    if (units[_rr].alive && units[_rr].team === 1 && !units[_rr].campGuard) {
-      if (ratio >= 0.55) units[_rr].retreating = false;
+  // Сбрасываем отступление если не в режиме бегства/сбора
+  if (chosenMode !== 'retreat' && chosenMode !== 'rally') {
+    for (var _rr = 0; _rr < units.length; _rr++) {
+      if (units[_rr].alive && units[_rr].team === 1 && !units[_rr].campGuard) {
+        units[_rr].retreating = false;
+      }
     }
   }
 }
