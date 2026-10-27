@@ -1784,26 +1784,43 @@ function updateAI(dt) {
     }
   }
 
-  // Разделяем если: достаточно юнитов, есть два разных объекта, режим не экстренный
-  // Второй объект = нейтральный лагерь ИЛИ незащищённый лагерь для захвата
-  var splitObjTarget = campTarget || recapTarget;
+  // ── РЕШЕНИЕ О РАЗДЕЛЕНИИ ─────────────────────────────────
   var canSplit = !aiSplit && redsActive.length >= 8 && ratio >= 0.9 && aiModeTimer <= 0;
-  if (canSplit && splitObjTarget && nearestBlue) {
-    var campDir  = Math.hypot(splitObjTarget.x - cAll.x, splitObjTarget.y - cAll.y);
-    var enemyDir = Math.hypot(nearestBlue.x - cAll.x, nearestBlue.y - cAll.y);
-    // Цели в разных направлениях (угол > 60°)?
-    var dotProd = ((splitObjTarget.x - cAll.x) * (nearestBlue.x - cAll.x) +
-                   (splitObjTarget.y - cAll.y) * (nearestBlue.y - cAll.y)) /
-                  (campDir * enemyDir + 0.001);
-    if (dotProd < 0.5 && campDir > 80 && enemyDir > 60) {
-      aiSplit = true;
+  var splitObjTarget = campTarget || recapTarget; // вторая цель для захвата
+
+  var didSplit = false;
+
+  // Тип 1: ЗАХВАТ + АТАКА — два объекта в разных направлениях
+  if (canSplit && splitObjTarget && nearestBlue && !didSplit) {
+    var _sd1 = Math.hypot(splitObjTarget.x - cAll.x, splitObjTarget.y - cAll.y);
+    var _sd2 = Math.hypot(nearestBlue.x - cAll.x, nearestBlue.y - cAll.y);
+    var _sdot = ((splitObjTarget.x - cAll.x) * (nearestBlue.x - cAll.x) +
+                 (splitObjTarget.y - cAll.y) * (nearestBlue.y - cAll.y)) /
+                (_sd1 * _sd2 + 0.001);
+    if (_sdot < 0.5 && _sd1 > 80 && _sd2 > 60) {
+      aiSplit = true; didSplit = true;
       var _sa = redsActive.slice();
-      // Меньшая группа (40%) идёт на лагерь, большая (60%) атакует
-      var splitIdx = Math.floor(_sa.length * 0.4);
+      var splitIdx = Math.floor(_sa.length * 0.4); // 40% захватывают, 60% атакуют
       _sa.forEach(function(u, i) { u.group = i < splitIdx ? 1 : 0; });
-      aiFocusGroup = 0; // фокус на атакующей группе
+      aiFocusGroup = 0;
       aiFocusSwitchTimer = AI_FOCUS_SWITCH_TIME;
       targets[1][1] = { x: splitObjTarget.x, y: splitObjTarget.y };
+    }
+  }
+
+  // Тип 2: ОКРУЖЕНИЕ — при явном превосходстве, одна группа атакует, другая заходит с фланга
+  if (canSplit && !didSplit && nearestBlue && ratio >= 1.3) {
+    // flankX/Y уже вычислены выше — точка на 200px перпендикулярно к врагу
+    var _fd = Math.hypot(flankX - nearestBlue.x, flankY - nearestBlue.y);
+    if (_fd > 100) { // фланг достаточно отличается от фронта
+      aiSplit = true; didSplit = true;
+      var _sb = redsActive.slice();
+      // Пополам: группа 0 — фронт, группа 1 — фланг
+      _sb.forEach(function(u, i) { u.group = i < Math.ceil(_sb.length / 2) ? 0 : 1; });
+      aiFocusGroup = 0;
+      aiFocusSwitchTimer = AI_FOCUS_SWITCH_TIME;
+      targets[1][0] = { x: nearestBlue.x, y: nearestBlue.y }; // фронт
+      targets[1][1] = { x: flankX, y: flankY };               // фланг
     }
   }
 
