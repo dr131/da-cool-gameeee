@@ -938,7 +938,7 @@ function captureUnit(unit, captorTeam) {
 function updateMovement(dt) {
 
   units.forEach(u => {
-    if (!u.alive || isFighting(u) || (u.campGuard && u.isNeutral)) return;
+    if (!u.alive || isFighting(u) || u.isNeutral) return;
 
     // Ожидает у лагеря: стоит пока не подойдёт союзник из армии
     if (u.waiting) {
