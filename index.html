@@ -1851,7 +1851,7 @@ function updateAI(dt) {
   // ════════════════════════════════════════════════════════════
   // ── КОМАНДЫ ДЛЯ АКТИВНОЙ (ФОКУСНОЙ) ГРУППЫ ───────────────
   // ════════════════════════════════════════════════════════════
-  var tx, ty, chosenMode;
+  var tx, ty, chosenMode = '';
 
   // Приоритет 1: СБОР РЕЗЕРВА
   if (rallyTarget && ratio < 0.75) {
@@ -1880,9 +1880,11 @@ function updateAI(dt) {
     tx = escapeX; ty = escapeY;
     chosenMode = 'retreat';
     aiModeTimer = 4;
+  }
+
   // Приоритет 4: ДОМИНИРОВАНИЕ — при большом преимуществе сразу атакуем главные силы
   var dominates = ratio >= 1.4 && nearestBlue && nearestBlueDist < 400;
-  if (dominates) {
+  if (dominates && chosenMode === '') {
     tx = nearestBlue.x; ty = nearestBlue.y;
     chosenMode = 'attack'; // atack-dominant: не даём игроку убегать и занимать базы
 
